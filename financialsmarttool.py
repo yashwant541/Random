@@ -1,6 +1,6 @@
 # ============================================================
 # DATAIKU SMART FINANCIAL STATEMENT EXTRACTOR
-# PDF + DOCX | Managed Folder Compatible
+# PDF + DOCX + TXT | Managed Folder Compatible
 # ============================================================
 
 import dataiku
@@ -138,6 +138,14 @@ def read_docx_lines(file_path: str) -> List[Tuple[int, str]]:
             lines.append((i, para.text))
     return lines
 
+def read_txt_lines(file_path: str) -> List[Tuple[int, str]]:
+    lines = []
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for i, line in enumerate(f, 1):
+            if line.strip():
+                lines.append((i, line.strip()))
+    return lines
+
 # ============================================================
 # CORE EXTRACTION
 # ============================================================
@@ -210,22 +218,25 @@ def run():
     output_folder = Folder(OUTPUT_FOLDER_ID)
 
     files = input_folder.list_paths_in_partition()
-    files = [f for f in files if f.lower().endswith((".pdf", ".docx"))]
+    files = [f for f in files if f.lower().endswith((".pdf", ".docx", ".txt"))]
 
     if not files:
-        raise Exception("❌ No PDF or DOCX found in input folder")
+        raise Exception("❌ No PDF, DOCX, or TXT files found in input folder")
 
     filename = files[0]
     print(f"📄 Processing file: {filename}")
 
     local_path = get_local_file(input_folder, filename)
 
+    # Route to appropriate reader based on file extension
     if filename.lower().endswith(".pdf"):
         lines = read_pdf_lines(local_path)
     elif filename.lower().endswith(".docx"):
         lines = read_docx_lines(local_path)
+    elif filename.lower().endswith(".txt"):
+        lines = read_txt_lines(local_path)
     else:
-        raise Exception("Unsupported file type")
+        raise Exception(f"Unsupported file type: {filename}")
 
     data = extract_financial_data(lines)
 
@@ -238,6 +249,7 @@ def run():
     write_excel(output_folder, output_name, df)
 
     print(f"✅ Extraction complete → {output_name}")
+    print(f"📊 Extracted {len(data)} financial line items")
     
     # Clean up temporary file
     try:
