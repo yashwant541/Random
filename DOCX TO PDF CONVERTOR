@@ -1,0 +1,41 @@
+import dataiku
+import subprocess
+import tempfile
+import os
+
+# Dataiku folders
+input_folder = dataiku.Folder("input_folder")
+output_folder = dataiku.Folder("output_folder")
+
+# Loop over DOCX files
+for file_path in input_folder.list_paths_in_partition():
+    if not file_path.lower().endswith(".docx"):
+        continue
+
+    print(f"Processing: {file_path}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        docx_tmp = os.path.join(tmpdir, "input.docx")
+        pdf_tmp = os.path.join(tmpdir, "input.pdf")
+
+        # ---- DOWNLOAD STREAM → TEMP FILE ----
+        with input_folder.get_download_stream(file_path) as stream:
+            with open(docx_tmp, "wb") as f:
+                f.write(stream.read())
+
+        # ---- CONVERT DOCX → PDF ----
+        subprocess.run([
+            "libreoffice",
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", tmpdir,
+            docx_tmp
+        ], check=True)
+
+        # ---- UPLOAD STREAM ----
+        output_name = file_path.split("/")[-1].replace(".docx", ".pdf")
+        with open(pdf_tmp, "rb") as pdf_file:
+            with output_folder.get_writer(output_name) as writer:
+                writer.write(pdf_file.read())
+
+        print(f"Saved: {output_name}")
