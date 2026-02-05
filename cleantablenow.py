@@ -15,22 +15,43 @@ from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 
 # =============================================================================
-# CONFIGURATION - SET THESE TO YOUR DATAIKU FOLDER IDs
+# CONFIGURATION SECTION
 # =============================================================================
-INPUT_FOLDER_ID = "xFGhJtYE"          # Your Dataiku INPUT folder ID (grouped tables)
-OUTPUT_FOLDER_ID = "output_folder_id" # Your Dataiku OUTPUT folder ID (structured tables)
+# Configure these variables based on your Dataiku setup
+# =============================================================================
+
+# Dataiku folder IDs - set these to match your project
+# You can find these in Dataiku folder URLs or properties
+INPUT_FOLDER_ID = "xFGhJtYE"          # Dataiku INPUT folder ID (grouped tables)
+OUTPUT_FOLDER_ID = "output_folder_id" # Dataiku OUTPUT folder ID (structured tables)
+
+# Optional: Dataset output settings (alternative to folder output)
+OUTPUT_DATASET_NAME = "structured_tables_output"  # Name for output dataset
+
+# Processing mode: 'batch' or 'interactive'
+PROCESSING_MODE = "batch"  # Change to "interactive" for manual file selection
 
 # =============================================================================
-# DATAIKU HELPER FUNCTIONS
+# DATAIKU FOLDER HELPER FUNCTIONS
 # =============================================================================
 
 def get_input_folder():
     """Get Dataiku input folder object"""
-    return dataiku.Folder(INPUT_FOLDER_ID)
+    try:
+        return dataiku.Folder(INPUT_FOLDER_ID)
+    except Exception as e:
+        print(f"❌ Error accessing input folder '{INPUT_FOLDER_ID}': {e}")
+        print("Please check that the folder ID is correct and accessible.")
+        raise
 
 def get_output_folder():
     """Get Dataiku output folder object"""
-    return dataiku.Folder(OUTPUT_FOLDER_ID)
+    try:
+        return dataiku.Folder(OUTPUT_FOLDER_ID)
+    except Exception as e:
+        print(f"❌ Error accessing output folder '{OUTPUT_FOLDER_ID}': {e}")
+        print("Please check that the folder ID is correct and accessible.")
+        raise
 
 def list_excel_files_in_folder() -> List[str]:
     """
@@ -43,6 +64,7 @@ def list_excel_files_in_folder() -> List[str]:
     all_files = folder.list_paths_in_partition()
     
     excel_files = [f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))]
+    print(f"📁 Found {len(excel_files)} Excel file(s) in folder '{INPUT_FOLDER_ID}'")
     return sorted(excel_files)
 
 def read_excel_from_dataiku(filename: str) -> Dict[str, pd.DataFrame]:
@@ -80,15 +102,15 @@ def read_excel_from_dataiku(filename: str) -> Dict[str, pd.DataFrame]:
                 excel_file.seek(0)
                 df = pd.read_excel(excel_file, sheet_name=sheet)
                 tables[sheet] = df
-                print(f"   📊 {sheet}: {len(df):,} rows")
+                print(f"   📊 Sheet '{sheet}': {len(df):,} rows, {len(df.columns)} columns")
             except Exception as e:
-                print(f"   ⚠️ Error loading sheet {sheet}: {e}")
+                print(f"   ⚠️ Error loading sheet '{sheet}': {e}")
         
-        print(f"   ✅ Loaded {len(tables)} sheets")
+        print(f"   ✅ Successfully loaded {len(tables)} sheets")
         return tables
         
     except Exception as e:
-        print(f"❌ Error reading file {filename}: {e}")
+        print(f"❌ Error reading file '{filename}' from Dataiku: {e}")
         raise
 
 def save_excel_to_dataiku(tables: Dict[str, pd.DataFrame], filename: str) -> None:
@@ -109,6 +131,7 @@ def save_excel_to_dataiku(tables: Dict[str, pd.DataFrame], filename: str) -> Non
             # Save each table
             for sheet_name, table_df in tables.items():
                 if table_df.empty:
+                    print(f"   ⚠️ Skipping empty sheet: {sheet_name}")
                     continue
                 
                 # Clean sheet name for Excel
@@ -125,6 +148,7 @@ def save_excel_to_dataiku(tables: Dict[str, pd.DataFrame], filename: str) -> Non
                 
                 # Save to Excel
                 table_df.to_excel(writer, sheet_name=clean_sheet_name, index=False)
+                print(f"   📝 Saved sheet: {clean_sheet_name} ({len(table_df):,} rows)")
         
         # Get the bytes and save to Dataiku
         excel_bytes = output.getvalue()
@@ -132,11 +156,11 @@ def save_excel_to_dataiku(tables: Dict[str, pd.DataFrame], filename: str) -> Non
         with folder.get_writer(filename) as writer:
             writer.write(excel_bytes)
         
-        print(f"✅ Saved to Dataiku: {filename}")
-        print(f"   Sheets: {len(tables)}")
+        print(f"✅ Successfully saved to Dataiku: {filename}")
+        print(f"   Total sheets: {len(tables)}")
         
     except Exception as e:
-        print(f"❌ Error saving file {filename}: {e}")
+        print(f"❌ Error saving file '{filename}' to Dataiku: {e}")
         raise
 
 # =============================================================================
@@ -245,17 +269,18 @@ def create_structured_table_from_raw(table_df: pd.DataFrame, table_num: int) -> 
     df = table_df.copy()
     
     # Parse Regular_Numbers for each row
+    print(f"    Parsing Regular_Numbers column...")
     df['Parsed_Numbers'] = df['Regular_Numbers'].apply(parse_regular_numbers)
     
     # Check if all rows have the same number of regular numbers
     num_counts = df['Parsed_Numbers'].apply(len).unique()
     if len(num_counts) != 1:
-        print(f"  ⚠️ Table {table_num}: Rows have different numbers of regular numbers: {num_counts}")
+        print(f"    ⚠️ Rows have different numbers of regular numbers: {num_counts}")
         # Use the most common count
         from collections import Counter
         count_counter = Counter(df['Parsed_Numbers'].apply(len))
         most_common_count = count_counter.most_common(1)[0][0]
-        print(f"     Using most common count: {most_common_count}")
+        print(f"    Using most common count: {most_common_count}")
     else:
         most_common_count = num_counts[0]
     
@@ -268,6 +293,8 @@ def create_structured_table_from_raw(table_df: pd.DataFrame, table_num: int) -> 
         column_names = ['Current', 'Prior']
     else:
         column_names = [f'Value{i+1}' for i in range(most_common_count)]
+    
+    print(f"    Creating {most_common_count} value columns: {column_names}")
     
     # Create new structured DataFrame
     structured_data = []
@@ -303,14 +330,17 @@ def create_structured_table_from_raw(table_df: pd.DataFrame, table_num: int) -> 
         
         # Add metadata
         metadata = {}
-        if 'Page' in row:
-            metadata['Page'] = int(row['Page']) if pd.notna(row['Page']) else ''
-        if 'Section' in row:
-            metadata['Section'] = str(row['Section']) if pd.notna(row['Section']) else ''
+        if 'Page' in row and pd.notna(row['Page']):
+            try:
+                metadata['Page'] = int(row['Page'])
+            except:
+                metadata['Page'] = str(row['Page'])
+        if 'Section' in row and pd.notna(row['Section']):
+            metadata['Section'] = str(row['Section'])
         
         # Add metadata as JSON
         if metadata:
-            row_dict['_metadata'] = json.dumps(metadata)
+            row_dict['_metadata'] = json.dumps(metadata, ensure_ascii=False)
         
         structured_data.append(row_dict)
     
@@ -387,6 +417,8 @@ def add_numeric_columns(structured_df: pd.DataFrame) -> pd.DataFrame:
     # Identify value columns (exclude Line Item and metadata)
     value_columns = [col for col in df.columns if col not in ['Line Item', '_metadata']]
     
+    print(f"    Adding numeric columns for: {value_columns}")
+    
     # Add numeric versions of each value column
     for col in value_columns:
         numeric_values = []
@@ -410,19 +442,20 @@ def process_single_table(table_df: pd.DataFrame, table_num: int) -> pd.DataFrame
     Process a single table from raw format to structured format.
     """
     print(f"\n  📋 Processing Table {table_num}:")
-    print(f"    Rows: {len(table_df):,}")
+    print(f"    Input rows: {len(table_df):,}")
+    print(f"    Input columns: {list(table_df.columns)}")
     
     # Check required columns
     required_cols = ['Label', 'Regular_Numbers']
     missing_cols = [col for col in required_cols if col not in table_df.columns]
     
     if missing_cols:
-        print(f"    ⚠️ Missing columns: {missing_cols}")
+        print(f"    ⚠️ Missing required columns: {missing_cols}")
         
         # Try to find alternative column names
         alt_mapping = {
-            'Label': ['label', 'Label', 'line_item', 'Line_Item'],
-            'Regular_Numbers': ['regular_numbers', 'Regular_Numbers', 'numbers', 'Numbers']
+            'Label': ['label', 'Label', 'line_item', 'Line_Item', 'Line Item'],
+            'Regular_Numbers': ['regular_numbers', 'Regular_Numbers', 'numbers', 'Numbers', 'Regular Numbers']
         }
         
         for missing in missing_cols:
@@ -435,7 +468,8 @@ def process_single_table(table_df: pd.DataFrame, table_num: int) -> pd.DataFrame
         # Check again
         missing_cols = [col for col in required_cols if col not in table_df.columns]
         if missing_cols:
-            print(f"    ❌ Still missing: {missing_cols}")
+            print(f"    ❌ Still missing required columns: {missing_cols}")
+            print(f"    Available columns: {list(table_df.columns)}")
             return pd.DataFrame()
     
     # Create structured table
@@ -478,6 +512,7 @@ def save_structured_tables_to_dataiku(structured_tables: Dict[str, pd.DataFrame]
     for sheet_name, table_df in structured_tables.items():
         if not table_df.empty:
             all_tables[sheet_name] = table_df
+            print(f"  📝 Preparing sheet: {sheet_name} ({len(table_df):,} rows)")
     
     # Create summary sheet
     summary_data = []
@@ -501,6 +536,7 @@ def save_structured_tables_to_dataiku(structured_tables: Dict[str, pd.DataFrame]
     if summary_data:
         summary_df = pd.DataFrame(summary_data)
         all_tables['Summary'] = summary_df
+        print(f"  📝 Created summary sheet: {len(summary_df):,} tables summarized")
     
     # Create README sheet
     readme_content = [
@@ -525,49 +561,10 @@ def save_structured_tables_to_dataiku(structured_tables: Dict[str, pd.DataFrame]
     # Save to Dataiku
     save_excel_to_dataiku(all_tables, output_filename)
     
-    print(f"\n🎉 Successfully saved {len(structured_tables)} structured tables")
-
-def show_table_preview(structured_tables: Dict[str, pd.DataFrame]) -> None:
-    """
-    Show a preview of the structured tables.
-    """
-    if not structured_tables:
-        return
-    
-    print(f"\n📊 PREVIEW OF STRUCTURED TABLES")
-    print("="*80)
-    
-    # Show first 3 tables only
-    tables_to_show = list(structured_tables.items())[:3]
-    
-    for sheet_name, table_df in tables_to_show:
-        if table_df.empty:
-            continue
-        
-        print(f"\n📋 {sheet_name} ({len(table_df):,} rows)")
-        print("-" * 80)
-        
-        # Get value columns (excluding numeric and metadata)
-        value_cols = [col for col in table_df.columns 
-                     if col not in ['Line Item', '_metadata'] and not col.endswith('_Num')]
-        
-        # Show header
-        header = f"{'Line Item':<30} | "
-        header += " | ".join([f"{col:<15}" for col in value_cols[:3]])  # Show first 3 value columns
-        print(header)
-        print("-" * 80)
-        
-        # Show first 3 rows
-        for idx, row in table_df.head(3).iterrows():
-            label = str(row['Line Item'])[:28]
-            values = " | ".join([str(row[col])[:13] for col in value_cols[:3]])
-            print(f"{label:<30} | {values}")
-        
-        if len(tables_to_show) > 1 and sheet_name != tables_to_show[-1][0]:
-            print()
+    print(f"\n🎉 Successfully saved {len(structured_tables)} structured tables to '{output_filename}'")
 
 # =============================================================================
-# BATCH PROCESSING FUNCTIONS
+# BATCH PROCESSING FUNCTION
 # =============================================================================
 
 def batch_process_all_files():
@@ -579,6 +576,7 @@ def batch_process_all_files():
     print(f"{'='*60}")
     print(f"Input folder:  {INPUT_FOLDER_ID}")
     print(f"Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"Mode:          {PROCESSING_MODE}")
     print(f"{'='*60}")
     
     # List all Excel files
@@ -599,6 +597,7 @@ def batch_process_all_files():
     results = []
     for filename in excel_files:
         print(f"\n🎯 Processing: {filename}")
+        print(f"{'-'*60}")
         
         try:
             # Read all sheets from Dataiku
@@ -606,26 +605,38 @@ def batch_process_all_files():
             
             if not all_tables:
                 print(f"   ⚠️ No tables found in file, skipping...")
+                results.append({
+                    'input_file': filename,
+                    'status': 'no_tables',
+                    'error': 'No tables found'
+                })
                 continue
             
             # Process each table sheet
             structured_tables = {}
+            processed_count = 0
             
             for sheet_name, table_df in all_tables.items():
                 # Skip summary/README sheets
                 if sheet_name.lower() in ['summary', 'readme', 'table_statistics', 'all_tables']:
-                    print(f"  ⏩ Skipping {sheet_name} (summary sheet)")
+                    print(f"  ⏩ Skipping '{sheet_name}' (summary sheet)")
                     continue
                 
                 # Extract table number from sheet name
                 table_num_match = re.search(r'(\d+)', str(sheet_name))
                 table_num = int(table_num_match.group(1)) if table_num_match else 1
                 
+                print(f"  🔄 Processing sheet: {sheet_name} (Table {table_num})")
+                
                 # Process the table
                 structured_df = process_single_table(table_df, table_num)
                 
                 if not structured_df.empty:
                     structured_tables[sheet_name] = structured_df
+                    processed_count += 1
+                    print(f"  ✅ Successfully structured: {sheet_name}")
+                else:
+                    print(f"  ⚠️ Failed to structure: {sheet_name}")
             
             if not structured_tables:
                 print(f"   ⚠️ No tables were successfully structured")
@@ -640,18 +651,18 @@ def batch_process_all_files():
             output_filename = filename.replace('.xlsx', '_structured.xlsx').replace('.xls', '_structured.xlsx')
             save_structured_tables_to_dataiku(structured_tables, output_filename)
             
-            # Show preview
-            show_table_preview(structured_tables)
-            
             results.append({
                 'input_file': filename,
                 'output_file': output_filename,
                 'tables_processed': len(structured_tables),
+                'sheets_processed': processed_count,
                 'status': 'success'
             })
             
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
+            import traceback
+            traceback.print_exc()
             results.append({
                 'input_file': filename,
                 'error': str(e),
@@ -659,7 +670,7 @@ def batch_process_all_files():
             })
         
         if filename != excel_files[-1]:
-            print(f"\n{'-'*60}")
+            print(f"\n{'='*60}")
     
     # Generate summary
     print(f"\n{'='*60}")
@@ -680,7 +691,7 @@ def batch_process_all_files():
         total_tables = sum(r.get('tables_processed', 0) for r in successful)
         print(f"\n✅ Created {total_tables} total structured tables")
         
-        print(f"\n📁 Output files created:")
+        print(f"\n📁 Output files created in '{OUTPUT_FOLDER_ID}' folder:")
         for result in successful:
             print(f"   • {result['output_file']} ({result['tables_processed']} tables)")
     
@@ -692,119 +703,13 @@ def batch_process_all_files():
     return results
 
 # =============================================================================
-# INTERACTIVE MODE (Optional)
+# DATAIKU RECIPE COMPATIBLE MAIN FUNCTION
 # =============================================================================
 
-def interactive_select_file():
+def run():
     """
-    Interactive mode for selecting a file from Dataiku folder
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TABLE STRUCTURING - INTERACTIVE MODE")
-    print(f"{'='*60}")
-    
-    # List available files
-    excel_files = list_excel_files_in_folder()
-    
-    if not excel_files:
-        print("❌ No Excel files found in input folder.")
-        return
-    
-    print(f"\n📁 Available files in '{INPUT_FOLDER_ID}' folder:")
-    print("-" * 50)
-    
-    for i, filename in enumerate(excel_files, 1):
-        print(f"{i:2d}. {filename}")
-    
-    print("-" * 50)
-    print("\nOptions:")
-    print("  [number] - Process a single file")
-    print("  'all'    - Process all files")
-    print("  'q'      - Quit")
-    
-    while True:
-        choice = input("\n👉 Your choice: ").strip().lower()
-        
-        if choice == 'q':
-            print("👋 Goodbye!")
-            return
-        
-        elif choice == 'all':
-            print(f"\n🎯 Processing ALL {len(excel_files)} files...")
-            batch_process_all_files()
-            break
-        
-        elif choice.isdigit():
-            index = int(choice) - 1
-            if 0 <= index < len(excel_files):
-                selected_file = excel_files[index]
-                print(f"\n🎯 Selected file: {selected_file}")
-                
-                try:
-                    # Read all sheets from Dataiku
-                    all_tables = read_excel_from_dataiku(selected_file)
-                    
-                    if not all_tables:
-                        print(f"❌ No tables found in file")
-                        break
-                    
-                    # Process each table sheet
-                    structured_tables = {}
-                    
-                    for sheet_name, table_df in all_tables.items():
-                        # Skip summary/README sheets
-                        if sheet_name.lower() in ['summary', 'readme', 'table_statistics', 'all_tables']:
-                            print(f"  ⏩ Skipping {sheet_name} (summary sheet)")
-                            continue
-                        
-                        # Extract table number from sheet name
-                        table_num_match = re.search(r'(\d+)', str(sheet_name))
-                        table_num = int(table_num_match.group(1)) if table_num_match else 1
-                        
-                        # Process the table
-                        structured_df = process_single_table(table_df, table_num)
-                        
-                        if not structured_df.empty:
-                            structured_tables[sheet_name] = structured_df
-                    
-                    if not structured_tables:
-                        print(f"❌ No tables were successfully structured")
-                        break
-                    
-                    # Ask for output filename
-                    default_output = selected_file.replace('.xlsx', '_structured.xlsx').replace('.xls', '_structured.xlsx')
-                    output_choice = input(f"\n💾 Output filename [Enter for '{default_output}']: ").strip()
-                    
-                    if not output_choice:
-                        output_choice = default_output
-                    
-                    # Save to Dataiku
-                    save_structured_tables_to_dataiku(structured_tables, output_choice)
-                    
-                    # Show preview
-                    show_table_preview(structured_tables)
-                    
-                    print(f"\n✅ Processing complete!")
-                    print(f"   Created {len(structured_tables)} structured tables")
-                    print(f"   Saved to: {output_choice}")
-                    
-                except Exception as e:
-                    print(f"❌ Error: {e}")
-                
-                break
-            else:
-                print(f"❌ Please enter a number between 1 and {len(excel_files)}")
-        
-        else:
-            print("❌ Invalid choice. Please enter a number, 'all', or 'q'")
-
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
-
-def main():
-    """
-    Main function to run the Dataiku table structuring tool
+    Main function optimized for Dataiku recipes.
+    This is the function Dataiku will call when running the recipe.
     """
     print(f"\n{'='*60}")
     print("DATAIKU TABLE STRUCTURING TOOL")
@@ -815,6 +720,7 @@ def main():
     print(f"Configuration:")
     print(f"  Input folder:  {INPUT_FOLDER_ID}")
     print(f"  Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"  Processing mode: {PROCESSING_MODE}")
     print(f"{'='*60}")
     
     try:
@@ -822,12 +728,13 @@ def main():
         try:
             import pandas as pd
             import openpyxl
+            print("✅ Required packages: pandas, openpyxl")
         except ImportError as e:
             print(f"❌ Missing required package: {e}")
             print("   Please add 'pandas' and 'openpyxl' to your Dataiku environment")
             return
         
-        # Run in batch mode (automatically processes all files)
+        # Run in batch mode
         results = batch_process_all_files()
         
         if results:
@@ -839,8 +746,10 @@ def main():
             successful = any(r.get('status') == 'success' for r in results)
             if successful:
                 print(f"📁 Check the output folder '{OUTPUT_FOLDER_ID}' for results.")
+                print(f"📊 Total files processed: {len(results)}")
             else:
                 print(f"⚠️ No files were successfully processed.")
+                print(f"   Please check the input files and folder configuration.")
         
         else:
             print(f"\n⚠️ No files were processed.")
@@ -850,51 +759,64 @@ def main():
         print(f"\n❌ An unexpected error occurred: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 # =============================================================================
-# SIMPLE VERSION - MINIMAL CODE
+# SIMPLE VERSION FOR QUICK INTEGRATION
 # =============================================================================
 
-def simple_dataiku_structure():
+def simple_process():
     """
-    Simple version for basic table structuring
+    Simple version for quick integration into Dataiku recipes.
+    Processes all files in the input folder and saves structured versions.
     """
-    # CONFIGURATION
-    INPUT_FOLDER = dataiku.Folder("xFGhJtYE")      # Your input folder
-    OUTPUT_FOLDER = dataiku.Folder("output_folder_id")  # Your output folder
-    
     print("Starting Dataiku table structuring...")
     
+    # Get folders
+    input_folder = dataiku.Folder(INPUT_FOLDER_ID)
+    output_folder = dataiku.Folder(OUTPUT_FOLDER_ID)
+    
     # List Excel files
-    all_files = INPUT_FOLDER.list_paths_in_partition()
-    excel_files = [f for f in all_files if f.lower().endswith('.xlsx') and 'grouped' in f.lower()]
+    all_files = input_folder.list_paths_in_partition()
+    excel_files = [f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))]
     
     if not excel_files:
-        print("No grouped table files found!")
+        print("No Excel files found in input folder!")
         return
+    
+    print(f"Found {len(excel_files)} Excel file(s)")
     
     for filename in excel_files:
         print(f"\nProcessing: {filename}")
         
         try:
-            # 1. READ FROM DATAIKU
-            with INPUT_FOLDER.get_download_stream(filename) as stream:
+            # Read file from Dataiku
+            with input_folder.get_download_stream(filename) as stream:
                 excel_bytes = stream.read()
             
-            # 2. LOAD MAIN SHEET (Table_1)
-            df = pd.read_excel(io.BytesIO(excel_bytes), sheet_name='Table_1')
-            print(f"  Read {len(df)} rows from Table_1")
+            # Load main sheet (Table_1 or first sheet)
+            excel_file = io.BytesIO(excel_bytes)
+            
+            # Try to read Table_1, otherwise first sheet
+            try:
+                df = pd.read_excel(excel_file, sheet_name='Table_1')
+            except:
+                excel_file.seek(0)
+                df = pd.read_excel(excel_file, sheet_name=0)
+            
+            print(f"  Read {len(df)} rows")
             
             if df.empty:
                 print("  ⚠️ Table is empty, skipping...")
                 continue
             
-            # 3. CHECK COLUMNS
-            if 'Label' not in df.columns or 'Regular_Numbers' not in df.columns:
-                print("  ❌ Required columns not found. Skipping...")
+            # Check required columns
+            required = ['Label', 'Regular_Numbers']
+            if not all(col in df.columns for col in required):
+                print(f"  ❌ Missing required columns. Available: {list(df.columns)}")
                 continue
             
-            # 4. PARSE REGULAR NUMBERS
+            # Parse numbers
             def parse_numbers(x):
                 if pd.isna(x): return []
                 if isinstance(x, list): return x
@@ -903,7 +825,7 @@ def simple_dataiku_structure():
             
             df['Parsed_Numbers'] = df['Regular_Numbers'].apply(parse_numbers)
             
-            # 5. CREATE STRUCTURED TABLE
+            # Create structured table
             structured_data = []
             for _, row in df.iterrows():
                 label = str(row['Label']).strip()
@@ -911,7 +833,7 @@ def simple_dataiku_structure():
                 
                 if numbers:
                     row_dict = {'Line Item': label}
-                    for i, num in enumerate(numbers[:3]):  # Max 3 columns
+                    for i, num in enumerate(numbers):
                         row_dict[f'Value{i+1}'] = num
                     structured_data.append(row_dict)
             
@@ -922,14 +844,14 @@ def simple_dataiku_structure():
             structured_df = pd.DataFrame(structured_data)
             print(f"  ✅ Created structured table: {len(structured_df)} rows")
             
-            # 6. SAVE TO DATAIKU
-            output_file = filename.replace('.xlsx', '_structured.xlsx')
+            # Save to Dataiku
+            output_file = filename.replace('.xlsx', '_structured.xlsx').replace('.xls', '_structured.xlsx')
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 structured_df.to_excel(writer, sheet_name='Structured_Table', index=False)
             
-            with OUTPUT_FOLDER.get_writer(output_file) as writer:
+            with output_folder.get_writer(output_file) as writer:
                 writer.write(output.getvalue())
             
             print(f"  💾 Saved to Dataiku: {output_file}")
@@ -938,12 +860,15 @@ def simple_dataiku_structure():
             print(f"  ❌ Error: {e}")
 
 # =============================================================================
-# RUN THE CODE
+# DATAIKU RECIPE ENTRY POINT
 # =============================================================================
 
+# This is the main entry point for Dataiku recipes
 if __name__ == "__main__":
-    # Run the main function (recommended)
-    main()
+    # Uncomment one of the following based on your needs:
     
-    # Alternatively, run the simple version:
-    # simple_dataiku_structure()
+    # Option 1: Full version (recommended)
+    run()
+    
+    # Option 2: Simple version (minimal code)
+    # simple_process()
