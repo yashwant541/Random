@@ -1,32 +1,34 @@
 import dataiku
-from docx import Document
-from io import BytesIO
+from docx2pdf import convert
+import tempfile
+import os
 
 # Dataiku folders
 input_folder = dataiku.Folder("input_folder")
 output_folder = dataiku.Folder("output_folder")
 
-# Iterate through files in input folder
 for file_path in input_folder.list_paths_in_partition():
-    
-    if file_path.lower().endswith(".docx"):
-        print(f"Processing: {file_path}")
+    if not file_path.lower().endswith(".docx"):
+        continue
+
+    print(f"Processing: {file_path}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        docx_tmp = os.path.join(tmpdir, "input.docx")
+        pdf_tmp = os.path.join(tmpdir, "input.pdf")
 
         # ---- DOWNLOAD STREAM ----
         with input_folder.get_download_stream(file_path) as stream:
-            doc_bytes = stream.read()
+            with open(docx_tmp, "wb") as f:
+                f.write(stream.read())
 
-        # Load DOCX from bytes
-        document = Document(BytesIO(doc_bytes))
-
-        # Extract text
-        text_lines = [para.text for para in document.paragraphs]
-
-        # Output file name
-        output_file_name = file_path.split("/")[-1].replace(".docx", ".txt")
+        # ---- CONVERT ----
+        convert(docx_tmp, pdf_tmp)
 
         # ---- UPLOAD STREAM ----
-        with output_folder.get_writer(output_file_name) as writer:
-            writer.write("\n".join(text_lines).encode("utf-8"))
+        output_name = file_path.split("/")[-1].replace(".docx", ".pdf")
+        with open(pdf_tmp, "rb") as pdf:
+            with output_folder.get_writer(output_name) as writer:
+                writer.write(pdf.read())
 
-        print(f"Saved: {output_file_name}")
+        print(f"Saved: {output_name}")
