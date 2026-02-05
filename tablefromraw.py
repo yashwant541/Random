@@ -10,6 +10,7 @@
 import numpy as np
 import json
 
+# ---- fix values ----
 def make_excel_safe(val):
     if isinstance(val, np.generic):
         return val.item()
@@ -18,6 +19,13 @@ def make_excel_safe(val):
     return val
 
 json_df = json_df.applymap(make_excel_safe)
+
+# ---- fix column names ----
+json_df.columns = [str(c) for c in json_df.columns]
+
+# ---- fix index ----
+json_df.index = [str(i) for i in json_df.index]
+
 
 
 
