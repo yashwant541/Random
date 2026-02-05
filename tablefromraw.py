@@ -45,7 +45,7 @@ def list_excel_files_in_folder() -> List[str]:
 
 def read_excel_from_dataiku(filename: str) -> pd.DataFrame:
     """
-    Read Excel file from Dataiku folder
+    Read Excel file from Dataiku folder with robust error handling
     
     Args:
         filename: Name of Excel file in Dataiku folder
@@ -64,18 +64,59 @@ def read_excel_from_dataiku(filename: str) -> pd.DataFrame:
         
         print(f"   ✅ Read {len(excel_bytes):,} bytes")
         
-        # Convert bytes to DataFrame
+        # Convert bytes to file-like object
         excel_file = io.BytesIO(excel_bytes)
         
-        # Read Excel file
-        df = pd.read_excel(excel_file)
+        # Try different engines based on file extension
+        file_ext = filename.lower()
         
-        print(f"   ✅ Loaded {len(df):,} rows, {len(df.columns)} columns")
+        if file_ext.endswith('.xlsx'):
+            # Try openpyxl engine first (for .xlsx)
+            try:
+                df = pd.read_excel(excel_file, engine='openpyxl')
+                print(f"   ✅ Loaded with openpyxl: {len(df):,} rows, {len(df.columns)} columns")
+                return df
+            except Exception as e1:
+                print(f"   ⚠️ openpyxl failed: {e1}")
+                # Try xlrd engine
+                try:
+                    excel_file.seek(0)  # Reset file pointer
+                    df = pd.read_excel(excel_file, engine='xlrd')
+                    print(f"   ✅ Loaded with xlrd: {len(df):,} rows, {len(df.columns)} columns")
+                    return df
+                except Exception as e2:
+                    print(f"   ⚠️ xlrd failed: {e2}")
         
-        return df
+        elif file_ext.endswith('.xls'):
+            # Try xlrd engine for .xls files
+            try:
+                df = pd.read_excel(excel_file, engine='xlrd')
+                print(f"   ✅ Loaded with xlrd: {len(df):,} rows, {len(df.columns)} columns")
+                return df
+            except Exception as e1:
+                print(f"   ⚠️ xlrd failed: {e1}")
+                # Try openpyxl as fallback
+                try:
+                    excel_file.seek(0)  # Reset file pointer
+                    df = pd.read_excel(excel_file, engine='openpyxl')
+                    print(f"   ✅ Loaded with openpyxl: {len(df):,} rows, {len(df.columns)} columns")
+                    return df
+                except Exception as e2:
+                    print(f"   ⚠️ openpyxl failed: {e2}")
+        
+        # If all else fails, try without specifying engine
+        try:
+            excel_file.seek(0)  # Reset file pointer
+            df = pd.read_excel(excel_file)
+            print(f"   ✅ Loaded with default engine: {len(df):,} rows, {len(df.columns)} columns")
+            return df
+        except Exception as e:
+            print(f"   ⚠️ Default engine failed: {e}")
+            raise
         
     except Exception as e:
         print(f"❌ Error reading file {filename}: {e}")
+        print("   Make sure the file is a valid Excel file (.xlsx or .xls)")
         raise
 
 def save_excel_to_dataiku(df: pd.DataFrame, filename: str) -> None:
@@ -89,7 +130,7 @@ def save_excel_to_dataiku(df: pd.DataFrame, filename: str) -> None:
     folder = get_output_folder()
     
     try:
-        # Create Excel in memory
+        # Create Excel in memory - always use openpyxl for writing
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
@@ -442,7 +483,14 @@ def batch_process_all_files():
     
     print(f"📁 Found {len(excel_files)} Excel file(s):")
     for i, filename in enumerate(excel_files, 1):
-        print(f"   {i}. {filename}")
+        file_ext = filename.lower()
+        if file_ext.endswith('.xlsx'):
+            file_type = "(.xlsx)"
+        elif file_ext.endswith('.xls'):
+            file_type = "(.xls - older format)"
+        else:
+            file_type = "(unknown)"
+        print(f"   {i}. {filename} {file_type}")
     
     print(f"\n🚀 Starting batch processing...")
     print(f"{'='*60}")
@@ -453,12 +501,16 @@ def batch_process_all_files():
         print(f"\n🎯 Processing: {filename}")
         
         try:
-            # Read Excel from Dataiku
+            # Read Excel from Dataiku with robust error handling
             df = read_excel_from_dataiku(filename)
             
             if df.empty:
                 print(f"   ⚠️ File is empty, skipping...")
                 continue
+            
+            # Display file info
+            print(f"   📊 File info: {len(df):,} rows, {len(df.columns)} columns")
+            print(f"   📋 Columns: {list(df.columns)}")
             
             # Group into tables
             tables = group_into_tables(df)
@@ -483,6 +535,11 @@ def batch_process_all_files():
             
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
+            print("   This might be due to:")
+            print("   1. File is not a valid Excel file")
+            print("   2. File is corrupted")
+            print("   3. Missing required packages (xlrd, openpyxl)")
+            print("   4. File is password protected")
             results.append({
                 'input_file': filename,
                 'error': str(e),
@@ -521,171 +578,30 @@ def batch_process_all_files():
     return results
 
 # =============================================================================
-# INTERACTIVE MODE (Optional)
-# =============================================================================
-
-def interactive_select_file():
-    """
-    Interactive mode for selecting a file from Dataiku folder
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TABLE GROUPING - INTERACTIVE MODE")
-    print(f"{'='*60}")
-    
-    # List available files
-    excel_files = list_excel_files_in_folder()
-    
-    if not excel_files:
-        print("❌ No Excel files found in input folder.")
-        return
-    
-    print(f"\n📁 Available files in '{INPUT_FOLDER_ID}' folder:")
-    print("-" * 50)
-    
-    for i, filename in enumerate(excel_files, 1):
-        print(f"{i:2d}. {filename}")
-    
-    print("-" * 50)
-    print("\nOptions:")
-    print("  [number] - Process a single file")
-    print("  'all'    - Process all files")
-    print("  'q'      - Quit")
-    
-    while True:
-        choice = input("\n👉 Your choice: ").strip().lower()
-        
-        if choice == 'q':
-            print("👋 Goodbye!")
-            return
-        
-        elif choice == 'all':
-            print(f"\n🎯 Processing ALL {len(excel_files)} files...")
-            batch_process_all_files()
-            break
-        
-        elif choice.isdigit():
-            index = int(choice) - 1
-            if 0 <= index < len(excel_files):
-                selected_file = excel_files[index]
-                print(f"\n🎯 Selected file: {selected_file}")
-                
-                try:
-                    # Read Excel from Dataiku
-                    df = read_excel_from_dataiku(selected_file)
-                    
-                    if df.empty:
-                        print(f"❌ File is empty")
-                        break
-                    
-                    # Group into tables
-                    tables = group_into_tables(df)
-                    
-                    if not tables:
-                        print(f"❌ No tables created")
-                        break
-                    
-                    # Analyze table columns
-                    analyze_table_columns(tables)
-                    
-                    # Ask for output filename
-                    default_output = selected_file.replace('.xlsx', '_grouped.xlsx').replace('.xls', '_grouped.xlsx')
-                    output_choice = input(f"\n💾 Output filename [Enter for '{default_output}']: ").strip()
-                    
-                    if not output_choice:
-                        output_choice = default_output
-                    
-                    # Save to Dataiku
-                    save_tables_to_dataiku(tables, output_choice)
-                    
-                    print(f"\n✅ Processing complete!")
-                    print(f"   Created {len(tables)} tables")
-                    print(f"   Saved to: {output_choice}")
-                    
-                except Exception as e:
-                    print(f"❌ Error: {e}")
-                
-                break
-            else:
-                print(f"❌ Please enter a number between 1 and {len(excel_files)}")
-        
-        else:
-            print("❌ Invalid choice. Please enter a number, 'all', or 'q'")
-
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
-
-def main():
-    """
-    Main function to run the Dataiku table grouping tool
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TABLE GROUPING TOOL")
-    print(f"{'='*60}")
-    print("Groups consecutive rows into tables where:")
-    print("  • Regular_Count == Consecutive_Count")
-    print("  • Consecutive rows have SAME count values")
-    print()
-    print(f"Configuration:")
-    print(f"  Input folder:  {INPUT_FOLDER_ID}")
-    print(f"  Output folder: {OUTPUT_FOLDER_ID}")
-    print(f"{'='*60}")
-    
-    try:
-        # Check required packages
-        try:
-            import pandas as pd
-            import openpyxl
-        except ImportError as e:
-            print(f"❌ Missing required package: {e}")
-            print("   Please add 'pandas' and 'openpyxl' to your Dataiku environment")
-            return
-        
-        # Run in batch mode (automatically processes all files)
-        results = batch_process_all_files()
-        
-        if results:
-            print(f"\n{'='*60}")
-            print("✅ PROCESSING COMPLETE!")
-            print(f"{'='*60}")
-            
-            # Check if any processing was successful
-            successful = any(r.get('status') == 'success' for r in results)
-            if successful:
-                print(f"📁 Check the output folder '{OUTPUT_FOLDER_ID}' for results.")
-            else:
-                print(f"⚠️ No files were successfully processed.")
-        
-        else:
-            print(f"\n⚠️ No files were processed.")
-            print(f"   Please check that Excel files exist in folder '{INPUT_FOLDER_ID}'")
-    
-    except Exception as e:
-        print(f"\n❌ An unexpected error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-
-# =============================================================================
-# SIMPLE VERSION - MINIMAL CODE
+# SIMPLE VERSION - MINIMAL CODE WITH BETTER ERROR HANDLING
 # =============================================================================
 
 def simple_dataiku_table_group():
     """
-    Simple version for basic table grouping
+    Simple version for basic table grouping with better error handling
     """
     # CONFIGURATION
     INPUT_FOLDER = dataiku.Folder("xFGhJtYE")      # Your input folder
     OUTPUT_FOLDER = dataiku.Folder("output_folder_id")  # Your output folder
     
     print("Starting Dataiku table grouping...")
+    print(f"Input folder: {INPUT_FOLDER_ID}")
+    print(f"Output folder: {OUTPUT_FOLDER_ID}")
     
     # List Excel files
     all_files = INPUT_FOLDER.list_paths_in_partition()
-    excel_files = [f for f in all_files if f.lower().endswith('.xlsx')]
+    excel_files = [f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))]
     
     if not excel_files:
         print("No Excel files found!")
         return
+    
+    print(f"Found {len(excel_files)} Excel file(s)")
     
     for filename in excel_files:
         print(f"\nProcessing: {filename}")
@@ -695,9 +611,32 @@ def simple_dataiku_table_group():
             with INPUT_FOLDER.get_download_stream(filename) as stream:
                 excel_bytes = stream.read()
             
-            # 2. LOAD DATAFRAME
-            df = pd.read_excel(io.BytesIO(excel_bytes))
-            print(f"  Read {len(df)} rows")
+            print(f"  Read {len(excel_bytes):,} bytes")
+            
+            # 2. TRY DIFFERENT ENGINES
+            excel_file = io.BytesIO(excel_bytes)
+            df = None
+            
+            # Try different engines
+            engines_to_try = ['openpyxl', 'xlrd']
+            for engine in engines_to_try:
+                try:
+                    excel_file.seek(0)  # Reset file pointer
+                    df = pd.read_excel(excel_file, engine=engine)
+                    print(f"  ✅ Loaded with {engine}: {len(df)} rows")
+                    break
+                except Exception as e:
+                    print(f"  ⚠️ {engine} failed: {e}")
+            
+            if df is None:
+                # Try without specifying engine
+                try:
+                    excel_file.seek(0)
+                    df = pd.read_excel(excel_file)
+                    print(f"  ✅ Loaded with default engine: {len(df)} rows")
+                except Exception as e:
+                    print(f"  ❌ Could not read Excel file: {e}")
+                    continue
             
             # 3. FIND COLUMNS
             reg_col = None
@@ -711,8 +650,10 @@ def simple_dataiku_table_group():
                     cons_col = col
             
             if not reg_col or not cons_col:
-                print(f"  ❌ Columns not found. Skipping...")
+                print(f"  ❌ Required columns not found. Available columns: {list(df.columns)}")
                 continue
+            
+            print(f"  Found columns: '{reg_col}', '{cons_col}'")
             
             # 4. GROUP INTO TABLES
             tables = []
@@ -740,7 +681,7 @@ def simple_dataiku_table_group():
             
             # 5. SAVE TO DATAIKU
             if tables:
-                output_file = filename.replace('.xlsx', '_grouped.xlsx')
+                output_file = filename.replace('.xlsx', '_grouped.xlsx').replace('.xls', '_grouped.xlsx')
                 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -762,12 +703,146 @@ def simple_dataiku_table_group():
             print(f"  ❌ Error: {e}")
 
 # =============================================================================
+# DEBUG FUNCTION TO CHECK FILE FORMAT
+# =============================================================================
+
+def debug_file_format(filename: str):
+    """
+    Debug function to check the format of a file in Dataiku
+    """
+    folder = get_input_folder()
+    
+    print(f"\n🔍 Debugging file: {filename}")
+    
+    try:
+        with folder.get_download_stream(filename) as stream:
+            file_bytes = stream.read()
+        
+        print(f"File size: {len(file_bytes):,} bytes")
+        print(f"First 100 bytes (hex): {file_bytes[:100].hex()}")
+        print(f"First 100 bytes (ascii): {file_bytes[:100]}")
+        
+        # Check for Excel signatures
+        excel_signatures = [
+            (b'PK\x03\x04', 'Excel 2007+ (.xlsx)'),
+            (b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1', 'Excel 97-2003 (.xls)'),
+            (b'\x09\x00\x04\x00', 'Excel 5.0/95'),
+            (b'\x09\x02\x06\x00', 'Excel 2.x')
+        ]
+        
+        for signature, description in excel_signatures:
+            if file_bytes.startswith(signature):
+                print(f"✓ Detected: {description}")
+                return
+        
+        print("⚠️ Unknown file format - may not be a valid Excel file")
+        
+    except Exception as e:
+        print(f"❌ Error reading file: {e}")
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+def main():
+    """
+    Main function to run the Dataiku table grouping tool
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU TABLE GROUPING TOOL")
+    print(f"{'='*60}")
+    print("Groups consecutive rows into tables where:")
+    print("  • Regular_Count == Consecutive_Count")
+    print("  • Consecutive rows have SAME count values")
+    print()
+    print(f"Configuration:")
+    print(f"  Input folder:  {INPUT_FOLDER_ID}")
+    print(f"  Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"{'='*60}")
+    
+    try:
+        # Check required packages
+        missing_packages = []
+        try:
+            import pandas as pd
+        except ImportError:
+            missing_packages.append('pandas')
+        
+        try:
+            import openpyxl
+        except ImportError:
+            missing_packages.append('openpyxl')
+        
+        try:
+            import xlrd
+        except ImportError:
+            missing_packages.append('xlrd')
+        
+        if missing_packages:
+            print(f"❌ Missing required packages: {', '.join(missing_packages)}")
+            print("   Please add these packages to your Dataiku environment:")
+            print("   1. Go to Administration → Code Envs")
+            print("   2. Select your environment → Packages")
+            print("   3. Add: pandas, openpyxl, xlrd")
+            return
+        
+        print("✅ All required packages are installed")
+        
+        # List files first
+        excel_files = list_excel_files_in_folder()
+        if not excel_files:
+            print(f"\n❌ No Excel files found in folder '{INPUT_FOLDER_ID}'")
+            print("   Please upload Excel files to the input folder")
+            return
+        
+        print(f"\n📁 Found {len(excel_files)} file(s) in input folder")
+        
+        # Optional: Debug first file
+        if excel_files:
+            print(f"\n🔍 Checking first file format: {excel_files[0]}")
+            debug_file_format(excel_files[0])
+        
+        # Ask user which mode to use
+        print(f"\n{'='*60}")
+        print("Select processing mode:")
+        print("  1. Simple mode (fast, minimal features)")
+        print("  2. Full mode (all features, robust error handling)")
+        print("  3. Debug mode (check file formats only)")
+        
+        while True:
+            choice = input("\n👉 Enter choice (1-3): ").strip()
+            
+            if choice == '1':
+                print("\n🚀 Starting SIMPLE mode...")
+                simple_dataiku_table_group()
+                break
+            elif choice == '2':
+                print("\n🚀 Starting FULL mode...")
+                results = batch_process_all_files()
+                if results:
+                    print(f"\n{'='*60}")
+                    print("✅ PROCESSING COMPLETE!")
+                    print(f"{'='*60}")
+                break
+            elif choice == '3':
+                print("\n🔍 Starting DEBUG mode...")
+                for filename in excel_files[:3]:  # Debug first 3 files
+                    debug_file_format(filename)
+                    if filename != excel_files[:3][-1]:
+                        print(f"\n{'-'*40}")
+                break
+            else:
+                print("❌ Please enter 1, 2, or 3")
+    
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+
+# =============================================================================
 # RUN THE CODE
 # =============================================================================
 
 if __name__ == "__main__":
-    # Run the main function (recommended)
+    # Run the main function
     main()
-    
-    # Alternatively, run the simple version:
-    # simple_dataiku_table_group()
