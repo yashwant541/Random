@@ -12,6 +12,7 @@ import numpy as np
 import re
 import tempfile
 import os
+import io
 from typing import List, Dict, Tuple
 from docx import Document
 
@@ -185,43 +186,65 @@ def get_local_file(folder: Folder, filename: str) -> str:
     return tmp.name
 
 def write_excel(folder: Folder, filename: str, df: pd.DataFrame):
+    # Create an in-memory bytes buffer for the Excel file
+    output = io.BytesIO()
+    
+    # Write DataFrame to Excel using pandas ExcelWriter
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Raw_Extraction', index=False)
+    
+    # Get the byte content and write to Dataiku folder
+    output.seek(0)
+    excel_content = output.getvalue()
+    
+    # Write to Dataiku folder
     with folder.get_writer(filename) as stream:
-        with pd.ExcelWriter(stream, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Raw_Extraction", index=False)
+        stream.write(excel_content)
 
 # ============================================================
 # DATAIKU ENTRY POINT
 # ============================================================
 
-input_folder = Folder(INPUT_FOLDER_ID)
-output_folder = Folder(OUTPUT_FOLDER_ID)
+def run():
+    input_folder = Folder(INPUT_FOLDER_ID)
+    output_folder = Folder(OUTPUT_FOLDER_ID)
 
-files = input_folder.list_paths_in_partition()
-files = [f for f in files if f.lower().endswith((".pdf", ".docx"))]
+    files = input_folder.list_paths_in_partition()
+    files = [f for f in files if f.lower().endswith((".pdf", ".docx"))]
 
-if not files:
-    raise Exception("❌ No PDF or DOCX found in input folder")
+    if not files:
+        raise Exception("❌ No PDF or DOCX found in input folder")
 
-filename = files[0]
-print(f"📄 Processing file: {filename}")
+    filename = files[0]
+    print(f"📄 Processing file: {filename}")
 
-local_path = get_local_file(input_folder, filename)
+    local_path = get_local_file(input_folder, filename)
 
-if filename.lower().endswith(".pdf"):
-    lines = read_pdf_lines(local_path)
-elif filename.lower().endswith(".docx"):
-    lines = read_docx_lines(local_path)
-else:
-    raise Exception("Unsupported file type")
+    if filename.lower().endswith(".pdf"):
+        lines = read_pdf_lines(local_path)
+    elif filename.lower().endswith(".docx"):
+        lines = read_docx_lines(local_path)
+    else:
+        raise Exception("Unsupported file type")
 
-data = extract_financial_data(lines)
+    data = extract_financial_data(lines)
 
-if not data:
-    raise Exception("❌ No financial data extracted")
+    if not data:
+        raise Exception("❌ No financial data extracted")
 
-df = pd.DataFrame(data)
+    df = pd.DataFrame(data)
 
-output_name = filename.rsplit(".", 1)[0] + "_raw_extraction.xlsx"
-write_excel(output_folder, output_name, df)
+    output_name = filename.rsplit(".", 1)[0] + "_raw_extraction.xlsx"
+    write_excel(output_folder, output_name, df)
 
-print(f"✅ Extraction complete → {output_name}")
+    print(f"✅ Extraction complete → {output_name}")
+    
+    # Clean up temporary file
+    try:
+        os.unlink(local_path)
+    except:
+        pass
+
+# Main execution
+if __name__ == "__main__":
+    run()
