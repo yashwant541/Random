@@ -7,6 +7,21 @@
 # Writes grouped tables & analysis back to Dataiku
 # =============================================================================
 
+import numpy as np
+import json
+
+def make_excel_safe(val):
+    if isinstance(val, np.generic):
+        return val.item()
+    if isinstance(val, (dict, list)):
+        return json.dumps(val)
+    return val
+
+json_df = json_df.applymap(make_excel_safe)
+
+
+
+
 import dataiku
 import pandas as pd
 import io
