@@ -1,64 +1,183 @@
-import pandas as pd
-import os
-import sys
-import glob
-from typing import Tuple, Optional
+# =============================================================================
+# DATAIKU RAW EXTRACTION FILTER
+# =============================================================================
+# This recipe filters raw extraction data from Excel files in Dataiku folders
+# Filter criteria:
+#   1. Regular_Count == Consecutive_Count
+#   2. Regular_Count > 2 (excludes counts ≤ 2)
+# =============================================================================
 
-def filter_raw_extraction(input_file: str, output_file: Optional[str] = None) -> Tuple[pd.DataFrame, int]:
+import dataiku
+import pandas as pd
+import io
+from typing import Tuple, Optional, Dict, List
+import re
+from datetime import datetime
+
+# =============================================================================
+# CONFIGURATION - SET THESE TO YOUR DATAIKU FOLDER IDs
+# =============================================================================
+INPUT_FOLDER_ID = "xFGhJtYE"          # Replace with your input folder ID
+OUTPUT_FOLDER_ID = "output_folder_id" # Replace with your output folder ID
+
+# Optional: File patterns to process (comma-separated)
+FILE_PATTERNS = ["*raw*.xlsx", "*extraction*.xlsx", "*.xlsx"]
+
+# Optional: Output filename suffix
+OUTPUT_SUFFIX = "_filtered_no2"
+
+# =============================================================================
+# DATAIKU HELPER FUNCTIONS
+# =============================================================================
+
+def get_input_folder():
+    """Get Dataiku input folder object"""
+    return dataiku.Folder(INPUT_FOLDER_ID)
+
+def get_output_folder():
+    """Get Dataiku output folder object"""
+    return dataiku.Folder(OUTPUT_FOLDER_ID)
+
+def list_excel_files_in_folder() -> List[str]:
+    """
+    List all Excel files in the input folder matching patterns
+    
+    Returns:
+        List of Excel filenames
+    """
+    folder = get_input_folder()
+    all_files = folder.list_paths_in_partition()
+    
+    excel_files = []
+    patterns = [p.strip() for p in FILE_PATTERNS]
+    
+    import fnmatch
+    for pattern in patterns:
+        for file in all_files:
+            if fnmatch.fnmatch(file.lower(), pattern.lower()):
+                if file not in excel_files:
+                    excel_files.append(file)
+    
+    return sorted(excel_files)
+
+def read_excel_from_dataiku(filename: str) -> pd.DataFrame:
+    """
+    Read Excel file from Dataiku folder and detect sheet names
+    
+    Returns:
+        Tuple of (DataFrame, sheet_name, sheet_names_list)
+    """
+    folder = get_input_folder()
+    
+    try:
+        print(f"📄 Reading Excel file from Dataiku: {filename}")
+        
+        # Read the entire file as bytes
+        with folder.get_download_stream(filename) as stream:
+            excel_bytes = stream.read()
+        
+        print(f"   Read {len(excel_bytes):,} bytes")
+        
+        # Use BytesIO to work with pandas
+        excel_file = io.BytesIO(excel_bytes)
+        
+        # Get sheet names
+        xls = pd.ExcelFile(excel_file)
+        sheet_names = xls.sheet_names
+        
+        print(f"   Found {len(sheet_names)} sheet(s): {sheet_names}")
+        
+        # Reset file pointer
+        excel_file.seek(0)
+        
+        return excel_file, sheet_names
+        
+    except Exception as e:
+        print(f"❌ Error reading Excel file {filename}: {e}")
+        raise
+
+def save_excel_to_dataiku(df: pd.DataFrame, filename: str) -> None:
+    """
+    Save DataFrame to Excel in Dataiku output folder
+    
+    Args:
+        df: DataFrame to save
+        filename: Output filename
+    """
+    folder = get_output_folder()
+    
+    try:
+        # Create Excel in memory
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Filtered_Data')
+        
+        # Get the bytes
+        excel_bytes = output.getvalue()
+        
+        # Save to Dataiku folder
+        with folder.get_writer(filename) as writer:
+            writer.write(excel_bytes)
+        
+        print(f"✅ Saved filtered data to: {filename}")
+        print(f"   Rows: {len(df):,}, Columns: {len(df.columns)}")
+        
+    except Exception as e:
+        print(f"❌ Error saving Excel file {filename}: {e}")
+        raise
+
+# =============================================================================
+# CORE FILTERING FUNCTION
+# =============================================================================
+
+def filter_raw_extraction(input_filename: str, output_filename: Optional[str] = None) -> Tuple[pd.DataFrame, int]:
     """
     Filter raw extraction data where:
     1. Regular_Count == Consecutive_Count
     2. Regular_Count > 2 (excludes counts ≤ 2)
     
     Args:
-        input_file: Path to the Excel file containing raw extraction
-        output_file: Path to save filtered output (if None, auto-generates)
+        input_filename: Name of Excel file in Dataiku input folder
+        output_filename: Name for output file (if None, auto-generates)
     
     Returns:
         Tuple of (filtered DataFrame, number of filtered rows)
     """
     
-    # Check if input file exists
-    if not os.path.exists(input_file):
-        print(f"❌ Input file not found: {input_file}")
-        return pd.DataFrame(), 0
-    
-    # Auto-generate output filename if not provided
-    if output_file is None:
-        base_name = os.path.splitext(input_file)[0]
-        output_file = base_name + '_filtered.xlsx'
-    
-    print(f"📄 Reading input file: {input_file}")
+    print(f"\n🎯 Processing file: {input_filename}")
+    print("-" * 50)
     
     try:
-        # Read the Excel file
-        xls = pd.ExcelFile(input_file)
+        # Read Excel from Dataiku
+        excel_file, sheet_names = read_excel_from_dataiku(input_filename)
         
         # Find the raw extraction sheet
         sheet_name = None
-        for sheet in xls.sheet_names:
+        for sheet in sheet_names:
             if 'raw' in sheet.lower() or 'Raw_Extraction' in sheet:
                 sheet_name = sheet
                 break
         
         if sheet_name is None:
             # Try to read the first sheet
-            sheet_name = xls.sheet_names[0]
+            sheet_name = sheet_names[0]
             print(f"⚠️ No raw extraction sheet found, using first sheet: {sheet_name}")
         
         # Read the data
-        df = pd.read_excel(input_file, sheet_name=sheet_name)
-        print(f"✅ Loaded {len(df)} rows from sheet: {sheet_name}")
+        df = pd.read_excel(excel_file, sheet_name=sheet_name)
+        print(f"✅ Loaded {len(df):,} rows from sheet: '{sheet_name}'")
         
         # Display available columns
-        print(f"\n📋 Available columns: {list(df.columns)}")
+        print(f"\n📋 Available columns ({len(df.columns)} total):")
+        for i, col in enumerate(df.columns, 1):
+            print(f"   {i:2d}. {col}")
         
         # Check for required columns (handle case-insensitive)
         column_map = {}
         required_columns = ['regular_count', 'consecutive_count']
         
         for col in df.columns:
-            col_lower = col.lower()
+            col_lower = col.lower().replace('_', '').replace(' ', '')
             if 'regular' in col_lower and 'count' in col_lower:
                 column_map['regular_count'] = col
             elif 'consecutive' in col_lower and 'count' in col_lower:
@@ -67,34 +186,34 @@ def filter_raw_extraction(input_file: str, output_file: Optional[str] = None) ->
         # If not found with pattern matching, try exact matches
         if 'regular_count' not in column_map:
             for col in df.columns:
-                if col.lower() == 'regular_count' or col == 'Regular_Count':
+                col_clean = col.lower().replace('_', '').replace(' ', '')
+                if col_clean == 'regularcount':
                     column_map['regular_count'] = col
                     break
         
         if 'consecutive_count' not in column_map:
             for col in df.columns:
-                if col.lower() == 'consecutive_count' or col == 'Consecutive_Count':
+                col_clean = col.lower().replace('_', '').replace(' ', '')
+                if col_clean == 'consecutivecount':
                     column_map['consecutive_count'] = col
                     break
         
         if 'regular_count' not in column_map or 'consecutive_count' not in column_map:
             print(f"\n❌ Required columns not found!")
             print(f"   Looking for columns containing 'regular count' and 'consecutive count'")
-            print(f"   Found columns: {list(df.columns)}")
-            print(f"   Column mapping: {column_map}")
+            print(f"   Column mapping attempted: {column_map}")
             
-            # Try to find similar columns
-            similar_cols = {}
+            # Show what we found
+            print(f"\n💡 Similar columns found:")
             for col in df.columns:
                 col_lower = col.lower()
-                if 'regular' in col_lower:
-                    similar_cols['regular'] = col
-                if 'consecutive' in col_lower:
-                    similar_cols['consecutive'] = col
+                if 'regular' in col_lower or 'consecutive' in col_lower:
+                    print(f"   - '{col}'")
             
-            if similar_cols:
-                print(f"\n💡 Similar columns found: {similar_cols}")
-                print("   Please check the column names in your Excel file.")
+            print("\n❓ Possible solutions:")
+            print("   1. Check column names in your Excel file")
+            print("   2. Rename columns to include 'Regular_Count' and 'Consecutive_Count'")
+            print("   3. Modify the code to match your column names")
             
             return pd.DataFrame(), 0
         
@@ -106,16 +225,23 @@ def filter_raw_extraction(input_file: str, output_file: Optional[str] = None) ->
         print(f"   Regular count: '{regular_col}'")
         print(f"   Consecutive count: '{consecutive_col}'")
         
+        # Ensure columns are numeric
+        df[regular_col] = pd.to_numeric(df[regular_col], errors='coerce')
+        df[consecutive_col] = pd.to_numeric(df[consecutive_col], errors='coerce')
+        
         # Display sample values
-        print(f"\n📊 Sample values before filtering:")
-        print(f"   Regular count range: {df[regular_col].min()} to {df[regular_col].max()}")
-        print(f"   Consecutive count range: {df[consecutive_col].min()} to {df[consecutive_col].max()}")
+        print(f"\n📊 Data statistics before filtering:")
+        print(f"   Regular count range: {df[regular_col].min():.0f} to {df[regular_col].max():.0f}")
+        print(f"   Consecutive count range: {df[consecutive_col].min():.0f} to {df[consecutive_col].max():.0f}")
+        print(f"   Null values in Regular count: {df[regular_col].isna().sum()}")
+        print(f"   Null values in Consecutive count: {df[consecutive_col].isna().sum()}")
         
         # Count rows by Regular_Count
         reg_counts = df[regular_col].value_counts().sort_index()
         print(f"\n📈 Distribution by Regular_Count:")
         for count, freq in reg_counts.items():
-            print(f"   Regular_Count = {count}: {freq} rows")
+            if pd.notna(count):
+                print(f"   Regular_Count = {int(count):>3}: {freq:>6} rows")
         
         # Apply filters
         print(f"\n🎯 Applying filters:")
@@ -125,379 +251,469 @@ def filter_raw_extraction(input_file: str, output_file: Optional[str] = None) ->
         # Filter 1: Regular_Count == Consecutive_Count
         filter1_mask = df[regular_col] == df[consecutive_col]
         df_filter1 = df[filter1_mask].copy()
-        print(f"   ✓ Filter 1 matched: {len(df_filter1)} rows")
+        print(f"   ✓ Filter 1 matched: {len(df_filter1):,} rows")
         
-        # Filter 2: Regular_Count > 2 (changed from > 1)
+        # Filter 2: Regular_Count > 2
         filter2_mask = df_filter1[regular_col] > 2
         df_filtered = df_filter1[filter2_mask].copy()
-        print(f"   ✓ Filter 2 matched: {len(df_filtered)} rows")
+        print(f"   ✓ Filter 2 matched: {len(df_filtered):,} rows")
         
-        # Show what was filtered out by each condition
+        # Show filtering breakdown
         print(f"\n📊 Detailed filtering breakdown:")
-        print(f"   Total rows: {len(df)}")
+        print(f"   Total rows: {len(df):,}")
+        print(f"   After Regular_Count == Consecutive_Count: {len(df_filter1):,}")
+        print(f"   After Regular_Count > 2: {len(df_filtered):,}")
         
-        # Count rows with Regular_Count == Consecutive_Count
-        equal_count = len(df_filter1)
-        print(f"   Rows with Regular_Count == Consecutive_Count: {equal_count}")
-        
-        # Count rows by specific counts that are being filtered out
-        print(f"\n📈 Rows being filtered out by count:")
-        
-        # Rows with count = 0
-        count_0 = len(df[df[regular_col] == 0])
-        if count_0 > 0:
-            print(f"   Count = 0: {count_0} rows")
-        
-        # Rows with count = 1
-        count_1 = len(df[df[regular_col] == 1])
-        if count_1 > 0:
-            print(f"   Count = 1: {count_1} rows")
-        
-        # Rows with count = 2
-        count_2 = len(df[df[regular_col] == 2])
-        if count_2 > 0:
-            print(f"   Count = 2: {count_2} rows")
-            
-            # Show if any count=2 rows have Regular_Count == Consecutive_Count
-            count_2_equal = len(df[(df[regular_col] == 2) & (df[regular_col] == df[consecutive_col])])
-            print(f"     - Among these, {count_2_equal} have Regular_Count == Consecutive_Count")
-        
-        # Rows with count > 2
-        count_gt2 = len(df[df[regular_col] > 2])
-        if count_gt2 > 0:
-            print(f"   Count > 2: {count_gt2} rows")
-            
-            # Show how many of these have Regular_Count == Consecutive_Count
-            count_gt2_equal = len(df[(df[regular_col] > 2) & (df[regular_col] == df[consecutive_col])])
-            print(f"     - Among these, {count_gt2_equal} have Regular_Count == Consecutive_Count")
+        # Show what was filtered out by count
+        print(f"\n📈 Rows filtered out by count value:")
+        for count in [0, 1, 2]:
+            count_rows = len(df[df[regular_col] == count])
+            if count_rows > 0:
+                # Count how many of these had Regular_Count == Consecutive_Count
+                equal_rows = len(df[(df[regular_col] == count) & (df[regular_col] == df[consecutive_col])])
+                print(f"   Count = {count}: {count_rows:,} total, {equal_rows:,} had Regular==Consecutive")
         
         if len(df_filtered) == 0:
             print(f"\n⚠️ No rows matched all filters!")
-            print(f"   Consider checking if columns contain the expected data types.")
             
-            # Show some examples that might be close
-            print(f"\n🔍 Examples of data that didn't match:")
+            # Show diagnostic information
+            print(f"\n🔍 Diagnostic information:")
             
-            # Show rows where Regular_Count != Consecutive_Count
-            diff_mask = df[regular_col] != df[consecutive_col]
-            if diff_mask.any():
-                diff_examples = df[diff_mask].head(3)
-                print(f"\n   Rows where Regular_Count != Consecutive_Count:")
-                for idx, row in diff_examples.iterrows():
-                    print(f"     - Row {idx}: Regular={row[regular_col]}, Consecutive={row[consecutive_col]}")
+            # Check if any rows have Regular_Count > 2
+            gt2_rows = len(df[df[regular_col] > 2])
+            print(f"   Rows with Regular_Count > 2: {gt2_rows:,}")
             
-            # Show rows where Regular_Count <= 2
-            low_mask = df[regular_col] <= 2
-            if low_mask.any():
-                low_examples = df[low_mask].head(3)
-                print(f"\n   Rows where Regular_Count <= 2:")
-                for idx, row in low_examples.iterrows():
-                    print(f"     - Row {idx}: Regular={row[regular_col]}, Consecutive={row[consecutive_col]}")
+            # Check if any rows have Regular_Count == Consecutive_Count
+            equal_rows = len(df[df[regular_col] == df[consecutive_col]])
+            print(f"   Rows with Regular_Count == Consecutive_Count: {equal_rows:,}")
+            
+            # Check overlap
+            overlap = len(df[(df[regular_col] > 2) & (df[regular_col] == df[consecutive_col])])
+            print(f"   Rows satisfying BOTH conditions: {overlap:,}")
             
             return pd.DataFrame(), 0
         
-        # Show what was filtered out
+        # Show statistics
         print(f"\n📊 Filter statistics:")
-        print(f"   Total rows: {len(df)}")
-        print(f"   Rows filtered out: {len(df) - len(df_filtered)}")
-        print(f"   Rows kept: {len(df_filtered)} ({len(df_filtered)/len(df)*100:.1f}%)")
+        print(f"   Total rows: {len(df):,}")
+        print(f"   Rows filtered out: {len(df) - len(df_filtered):,}")
+        print(f"   Rows kept: {len(df_filtered):,} ({len(df_filtered)/len(df)*100:.1f}%)")
         
-        # Show distribution of kept rows by Regular_Count
+        # Show distribution of kept rows
         print(f"\n📈 Kept rows by Regular_Count:")
         kept_counts = df_filtered[regular_col].value_counts().sort_index()
         for count, freq in kept_counts.items():
-            print(f"   Regular_Count = {count}: {freq} rows")
+            print(f"   Regular_Count = {int(count):>3}: {freq:>6} rows")
         
-        # Save to Excel
-        output_dir = os.path.dirname(output_file)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        # Auto-generate output filename if not provided
+        if output_filename is None:
+            base_name = input_filename.rsplit('.', 1)[0]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"{base_name}{OUTPUT_SUFFIX}_{timestamp}.xlsx"
         
-        # Save the filtered data
-        df_filtered.to_excel(output_file, index=False)
-        print(f"\n✅ Filtered data saved to: {output_file}")
-        print(f"   Rows: {len(df_filtered)}")
-        print(f"   Columns: {len(df_filtered.columns)}")
+        # Save to Dataiku output folder
+        save_excel_to_dataiku(df_filtered, output_filename)
         
         # Show sample of filtered data
-        print(f"\n📝 Sample of filtered data (first 5 rows):")
-        sample_cols = [regular_col, consecutive_col]
+        print(f"\n📝 Sample of filtered data (first 3 rows):")
+        
+        # Select columns to display
+        display_cols = [regular_col, consecutive_col]
         
         # Add other interesting columns if available
-        other_cols = ['Page', 'Label', 'Raw_Line', 'Regular_Numbers']
-        for col in other_cols:
+        interesting_cols = ['Page', 'Label', 'Raw_Line', 'Regular_Numbers', 'Text', 'Table']
+        for col in interesting_cols:
             for df_col in df_filtered.columns:
                 if col.lower() in df_col.lower():
-                    sample_cols.append(df_col)
-                    break
+                    if df_col not in display_cols:
+                        display_cols.append(df_col)
         
-        # Take unique columns
-        sample_cols = list(dict.fromkeys(sample_cols))
+        # Limit to 5 columns for display
+        display_cols = display_cols[:5]
         
-        sample_df = df_filtered[sample_cols].head(5)
+        sample_df = df_filtered[display_cols].head(3)
         for idx, row in sample_df.iterrows():
-            print(f"\n   [{idx}]")
-            for col in sample_cols:
+            print(f"\n   Row {idx}:")
+            for col in display_cols:
                 value = row[col]
-                if isinstance(value, list):
-                    print(f"     {col}: {str(value)[:50]}...")
+                if pd.isna(value):
+                    display_value = "[NaN]"
+                elif isinstance(value, float):
+                    display_value = f"{value:.2f}"
                 else:
-                    print(f"     {col}: {str(value)[:50]}")
+                    display_value = str(value)
+                print(f"     {col}: {display_value[:50]}")
         
         return df_filtered, len(df_filtered)
         
     except Exception as e:
-        print(f"\n❌ Error processing file: {e}")
+        print(f"\n❌ Error processing file {input_filename}: {e}")
         import traceback
         traceback.print_exc()
         return pd.DataFrame(), 0
 
-def get_input_file() -> str:
+# =============================================================================
+# BATCH PROCESSING FUNCTIONS
+# =============================================================================
+
+def process_single_file(input_filename: str, output_filename: Optional[str] = None) -> Dict:
     """
-    Ask user for input file path with autocomplete suggestions.
+    Process a single file and return results summary
     
     Returns:
-        Selected file path
+        Dictionary with processing results
     """
-    print("\n" + "="*60)
-    print("🔍 RAW EXTRACTION FILTER TOOL")
-    print("="*60)
-    print("Filters:")
+    print(f"\n{'='*60}")
+    print(f"🚀 PROCESSING: {input_filename}")
+    print(f"{'='*60}")
+    
+    result = {
+        'input_file': input_filename,
+        'output_file': '',
+        'total_rows': 0,
+        'filtered_rows': 0,
+        'status': 'pending',
+        'error': None
+    }
+    
+    try:
+        df_filtered, filtered_count = filter_raw_extraction(input_filename, output_filename)
+        
+        if filtered_count > 0:
+            result['status'] = 'success'
+            result['filtered_rows'] = filtered_count
+            result['total_rows'] = len(df_filtered)
+            
+            if output_filename:
+                result['output_file'] = output_filename
+            else:
+                # Generate output filename
+                base_name = input_filename.rsplit('.', 1)[0]
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                result['output_file'] = f"{base_name}{OUTPUT_SUFFIX}_{timestamp}.xlsx"
+        else:
+            result['status'] = 'no_match'
+            result['error'] = 'No rows matched filter criteria'
+    
+    except Exception as e:
+        result['status'] = 'error'
+        result['error'] = str(e)
+    
+    return result
+
+def batch_process_all_files() -> List[Dict]:
+    """
+    Process all Excel files in the input folder
+    
+    Returns:
+        List of processing results
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU RAW EXTRACTION FILTER - BATCH PROCESSING")
+    print(f"{'='*60}")
+    print(f"Input folder:  {INPUT_FOLDER_ID}")
+    print(f"Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"{'='*60}")
+    
+    # List all Excel files
+    excel_files = list_excel_files_in_folder()
+    
+    if not excel_files:
+        print("❌ No Excel files found in input folder.")
+        print(f"   Folder ID: {INPUT_FOLDER_ID}")
+        print(f"   Patterns: {FILE_PATTERNS}")
+        return []
+    
+    print(f"📁 Found {len(excel_files)} Excel file(s):")
+    for i, filename in enumerate(excel_files, 1):
+        print(f"   {i}. {filename}")
+    
+    print(f"\n🎯 Starting batch processing...")
+    
+    # Process each file
+    results = []
+    for filename in excel_files:
+        result = process_single_file(filename)
+        results.append(result)
+        
+        # Add separator between files
+        if filename != excel_files[-1]:
+            print(f"\n{'-'*60}")
+    
+    # Generate summary
+    print(f"\n{'='*60}")
+    print("BATCH PROCESSING SUMMARY")
+    print(f"{'='*60}")
+    
+    successful = [r for r in results if r['status'] == 'success']
+    no_match = [r for r in results if r['status'] == 'no_match']
+    errors = [r for r in results if r['status'] == 'error']
+    
+    print(f"📊 Results:")
+    print(f"   Total files processed: {len(results)}")
+    print(f"   Successfully filtered: {len(successful)}")
+    print(f"   No matches found: {len(no_match)}")
+    print(f"   Errors: {len(errors)}")
+    
+    if successful:
+        total_filtered = sum(r['filtered_rows'] for r in successful)
+        print(f"\n✅ Successfully filtered {total_filtered:,} total rows")
+        
+        print(f"\n📁 Output files created:")
+        for result in successful:
+            print(f"   • {result['output_file']} ({result['filtered_rows']:,} rows)")
+    
+    if no_match:
+        print(f"\n⚠️ Files with no matching rows:")
+        for result in no_match:
+            print(f"   • {result['input_file']}")
+    
+    if errors:
+        print(f"\n❌ Files with errors:")
+        for result in errors:
+            print(f"   • {result['input_file']}: {result['error']}")
+    
+    # Save summary to CSV
+    if results:
+        summary_df = pd.DataFrame([
+            {
+                'input_file': r['input_file'],
+                'output_file': r.get('output_file', ''),
+                'status': r['status'],
+                'filtered_rows': r.get('filtered_rows', 0),
+                'error': r.get('error', '')
+            }
+            for r in results
+        ])
+        
+        # Save summary to Dataiku output folder
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        summary_filename = f"batch_processing_summary_{timestamp}.csv"
+        
+        folder = get_output_folder()
+        with folder.get_writer(summary_filename) as writer:
+            summary_df.to_csv(writer, index=False)
+        
+        print(f"\n📋 Summary saved to: {summary_filename}")
+    
+    return results
+
+# =============================================================================
+# INTERACTIVE MODE FUNCTIONS
+# =============================================================================
+
+def interactive_mode():
+    """
+    Interactive mode for selecting and processing files
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU RAW EXTRACTION FILTER - INTERACTIVE MODE")
+    print(f"{'='*60}")
+    print("Filter criteria:")
     print("  1. Regular_Count == Consecutive_Count")
     print("  2. Regular_Count > 2 (excludes counts ≤ 2)")
-    print()
+    print(f"{'='*60}")
     
-    # Look for raw extraction files in current directory
-    print("📁 Searching for raw extraction files in current directory...")
-    current_dir = os.getcwd()
+    # List available files
+    excel_files = list_excel_files_in_folder()
     
-    # Common patterns for raw extraction files
-    patterns = [
-        '*raw*.xlsx',
-        '*raw*.xls',
-        '*extraction*.xlsx',
-        '*financial*.xlsx',
-        '*.xlsx'  # All Excel files as last resort
-    ]
+    if not excel_files:
+        print("❌ No Excel files found in input folder.")
+        print(f"   Please upload files to folder: {INPUT_FOLDER_ID}")
+        return
     
-    found_files = []
-    for pattern in patterns:
-        files = glob.glob(pattern)
-        for file in files:
-            if file not in found_files and os.path.isfile(file):
-                found_files.append(file)
+    print(f"\n📁 Available files in '{INPUT_FOLDER_ID}' folder:")
+    print("-" * 50)
     
-    if found_files:
-        print(f"✅ Found {len(found_files)} Excel file(s):")
-        print("-" * 40)
-        
-        for i, file in enumerate(found_files, 1):
-            file_size = os.path.getsize(file)
-            size_str = f"{file_size/1024:.1f} KB"
-            print(f"{i:2d}. {file} ({size_str})")
-        
-        print("-" * 40)
-        print("\nOptions:")
-        print("  - Enter a number (1-{}) to select from list".format(len(found_files)))
-        print("  - Enter a custom file path")
-        print("  - Enter 'q' to quit")
-        
-        while True:
-            choice = input("\n👉 Your choice: ").strip()
-            
-            if choice.lower() == 'q':
-                print("👋 Goodbye!")
-                sys.exit(0)
-            
-            # Check if choice is a number
-            if choice.isdigit():
-                index = int(choice) - 1
-                if 0 <= index < len(found_files):
-                    selected_file = found_files[index]
-                    if os.path.exists(selected_file):
-                        print(f"✅ Selected: {selected_file}")
-                        return selected_file
-                    else:
-                        print(f"❌ File no longer exists: {selected_file}")
-                else:
-                    print(f"❌ Please enter a number between 1 and {len(found_files)}")
-            
-            # Check if it's a file path
-            elif choice:
-                if os.path.exists(choice):
-                    print(f"✅ File found: {choice}")
-                    return choice
-                else:
-                    print(f"❌ File not found: {choice}")
-                    print("   Please check the path and try again.")
-            
-            else:
-                print("❌ Please enter a valid choice")
-    else:
-        print("❌ No Excel files found in current directory.")
-        print(f"   Current directory: {current_dir}")
-        print("\nPlease enter the full path to your raw extraction Excel file.")
-        
-        while True:
-            file_path = input("\n👉 Enter file path (or 'q' to quit): ").strip()
-            
-            if file_path.lower() == 'q':
-                print("👋 Goodbye!")
-                sys.exit(0)
-            
-            if not file_path:
-                print("❌ Please enter a file path")
-                continue
-            
-            if os.path.exists(file_path):
-                if file_path.lower().endswith(('.xlsx', '.xls')):
-                    print(f"✅ Excel file found: {file_path}")
-                    return file_path
-                else:
-                    print(f"⚠️ Warning: '{file_path}' is not an Excel file (.xlsx or .xls)")
-                    confirm = input("   Do you want to use it anyway? (y/n): ").strip().lower()
-                    if confirm == 'y':
-                        return file_path
-            else:
-                print(f"❌ File not found: {file_path}")
-                print("   Please check the path and try again.")
-
-def get_output_file(input_file: str) -> str:
-    """
-    Ask user for output file path with auto-suggestion.
+    for i, filename in enumerate(excel_files, 1):
+        print(f"{i:2d}. {filename}")
     
-    Args:
-        input_file: Input file path
-    
-    Returns:
-        Output file path
-    """
-    # Generate default output filename
-    base_name = os.path.splitext(input_file)[0]
-    default_output = base_name + '_filtered_no2.xlsx'
-    
-    print(f"\n💾 Output file suggestion: {default_output}")
-    print("   (Note: '_no2' indicates count=2 rows are filtered out)")
+    print("-" * 50)
+    print("\nOptions:")
+    print("  [number] - Process a single file")
+    print("  'all'    - Process all files")
+    print("  'q'      - Quit")
     
     while True:
-        output_path = input("👉 Enter output file path (press Enter for default): ").strip()
+        choice = input("\n👉 Your choice: ").strip().lower()
         
-        if not output_path:
-            output_path = default_output
-            print(f"✅ Using default: {output_path}")
-            return output_path
+        if choice == 'q':
+            print("👋 Goodbye!")
+            return
         
-        # Check if directory exists
-        output_dir = os.path.dirname(output_path)
-        if output_dir and not os.path.exists(output_dir):
-            print(f"⚠️ Directory does not exist: {output_dir}")
-            create_dir = input("   Create directory? (y/n): ").strip().lower()
-            if create_dir == 'y':
-                try:
-                    os.makedirs(output_dir, exist_ok=True)
-                    print(f"✅ Created directory: {output_dir}")
-                except Exception as e:
-                    print(f"❌ Failed to create directory: {e}")
-                    continue
+        elif choice == 'all':
+            print(f"\n🎯 Processing ALL {len(excel_files)} files...")
+            batch_process_all_files()
+            break
         
-        # Check if file already exists
-        if os.path.exists(output_path):
-            print(f"⚠️ File already exists: {output_path}")
-            overwrite = input("   Overwrite? (y/n): ").strip().lower()
-            if overwrite != 'y':
-                print("   Please enter a different output file path.")
-                continue
+        elif choice.isdigit():
+            index = int(choice) - 1
+            if 0 <= index < len(excel_files):
+                selected_file = excel_files[index]
+                print(f"\n🎯 Selected file: {selected_file}")
+                
+                # Ask for output filename
+                base_name = selected_file.rsplit('.', 1)[0]
+                default_output = f"{base_name}{OUTPUT_SUFFIX}.xlsx"
+                
+                output_choice = input(f"Output filename [Enter for '{default_output}']: ").strip()
+                if not output_choice:
+                    output_choice = default_output
+                
+                # Process the file
+                process_single_file(selected_file, output_choice)
+                break
+            else:
+                print(f"❌ Please enter a number between 1 and {len(excel_files)}")
         
-        return output_path
+        else:
+            print("❌ Invalid choice. Please enter a number, 'all', or 'q'")
+
+# =============================================================================
+# MAIN EXECUTION FUNCTION
+# =============================================================================
 
 def main():
     """
-    Main function to run the filtering process.
+    Main function to run the Dataiku raw extraction filter
     """
-    try:
-        # Get input file from user
-        input_file = get_input_file()
-        
-        # Get output file from user
-        output_file = get_output_file(input_file)
-        
-        print("\n" + "="*60)
-        print("🚀 STARTING FILTERING PROCESS")
-        print("="*60)
-        print("Filter criteria:")
-        print("  1. Regular_Count == Consecutive_Count")
-        print("  2. Regular_Count > 2 (excludes counts of 0, 1, and 2)")
-        print("="*60)
-        
-        # Run the filtering
-        df_filtered, count = filter_raw_extraction(input_file, output_file)
-        
-        if count > 0:
-            print("\n" + "="*60)
-            print("🎉 FILTERING COMPLETE!")
-            print("="*60)
-            print(f"✅ Successfully filtered {count} rows")
-            print(f"📂 Output saved to: {output_file}")
-            print("\n📊 Summary:")
-            print(f"   - Only rows with Regular_Count > 2 are kept")
-            print(f"   - Rows with count = 2 or less are filtered out")
-            print(f"   - Only consecutive regular numbers are included")
-            
-            # Offer to open the file
-            if sys.platform == 'win32':
-                open_file = input("\n📂 Open the output file? (y/n): ").strip().lower()
-                if open_file == 'y':
-                    os.startfile(output_file)
-            elif sys.platform == 'darwin':  # macOS
-                open_file = input("\n📂 Open the output file? (y/n): ").strip().lower()
-                if open_file == 'y':
-                    os.system(f'open "{output_file}"')
-            else:  # Linux
-                open_file = input("\n📂 Open the output file? (y/n): ").strip().lower()
-                if open_file == 'y':
-                    os.system(f'xdg-open "{output_file}"')
-        else:
-            print("\n" + "="*60)
-            print("⚠️ FILTERING COMPLETE - NO DATA MATCHED")
-            print("="*60)
-            print("No rows matched the filter criteria.")
-            print("\nPossible reasons:")
-            print("  1. No rows have Regular_Count == Consecutive_Count")
-            print("  2. All rows have Regular_Count ≤ 2")
-            print("  3. Column names don't match expected patterns")
-        
-        # Ask if user wants to process another file
-        print("\n" + "-"*40)
-        another = input("🔄 Process another file? (y/n): ").strip().lower()
-        if another == 'y':
-            main()  # Recursively call main for another file
-        else:
-            print("👋 Goodbye!")
+    print(f"\n{'='*60}")
+    print("DATAIKU RAW EXTRACTION FILTER")
+    print(f"{'='*60}")
+    print("Purpose: Filter raw extraction Excel files where:")
+    print("  • Regular_Count == Consecutive_Count")
+    print("  • Regular_Count > 2 (excludes counts ≤ 2)")
+    print(f"\nConfiguration:")
+    print(f"  Input folder:  {INPUT_FOLDER_ID}")
+    print(f"  Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"{'='*60}")
     
-    except KeyboardInterrupt:
-        print("\n\n⚠️ Process interrupted by user")
-        print("👋 Goodbye!")
+    try:
+        # Check if pandas is available
+        try:
+            import pandas as pd
+        except ImportError:
+            print("❌ ERROR: pandas is not installed.")
+            print("   Please add 'pandas' to your Dataiku code environment packages.")
+            return
+        
+        # Check if openpyxl is available (needed for Excel writing)
+        try:
+            import openpyxl
+        except ImportError:
+            print("❌ ERROR: openpyxl is not installed.")
+            print("   Please add 'openpyxl' to your Dataiku code environment packages.")
+            return
+        
+        # Run in batch mode by default
+        # Change this to interactive_mode() if you want interactive selection
+        results = batch_process_all_files()
+        
+        if results:
+            print(f"\n{'='*60}")
+            print("✅ PROCESSING COMPLETE!")
+            print(f"{'='*60}")
+            
+            # Check if any processing was successful
+            successful = any(r['status'] == 'success' for r in results)
+            if successful:
+                print(f"📁 Check the output folder '{OUTPUT_FOLDER_ID}' for results.")
+            else:
+                print(f"⚠️ No files were successfully processed.")
+                print(f"   Please check your input data and filter criteria.")
+        
+        else:
+            print(f"\n⚠️ No files were processed.")
+            print(f"   Please check that Excel files exist in folder '{INPUT_FOLDER_ID}'")
+    
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\n❌ An unexpected error occurred: {e}")
         import traceback
         traceback.print_exc()
 
-# =========================
-# RUN THE SCRIPT
-# =========================
+# =============================================================================
+# SIMPLE VERSION (Minimal Code)
+# =============================================================================
+
+def simple_filter():
+    """
+    Simple version for basic filtering - minimal dependencies
+    """
+    import dataiku
+    import pandas as pd
+    import io
+    
+    # Configuration - CHANGE THESE!
+    INPUT_FOLDER = dataiku.Folder("xFGhJtYE")  # Your input folder ID
+    OUTPUT_FOLDER = dataiku.Folder("output_folder_id")  # Your output folder ID
+    
+    print("Starting simple raw extraction filter...")
+    
+    # List Excel files
+    all_files = INPUT_FOLDER.list_paths_in_partition()
+    excel_files = [f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))]
+    
+    if not excel_files:
+        print("No Excel files found!")
+        return
+    
+    print(f"Found {len(excel_files)} Excel file(s)")
+    
+    for input_file in excel_files:
+        print(f"\nProcessing: {input_file}")
+        
+        try:
+            # Read from Dataiku
+            with INPUT_FOLDER.get_download_stream(input_file) as stream:
+                excel_bytes = stream.read()
+            
+            # Read Excel
+            df = pd.read_excel(io.BytesIO(excel_bytes))
+            
+            # Find regular_count and consecutive_count columns (case-insensitive)
+            reg_col = None
+            cons_col = None
+            
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'regular' in col_lower and 'count' in col_lower:
+                    reg_col = col
+                elif 'consecutive' in col_lower and 'count' in col_lower:
+                    cons_col = col
+            
+            if not reg_col or not cons_col:
+                print(f"  ❌ Required columns not found in {input_file}")
+                continue
+            
+            # Apply filters
+            mask = (df[reg_col] == df[cons_col]) & (df[reg_col] > 2)
+            df_filtered = df[mask].copy()
+            
+            print(f"  ✓ Filtered: {len(df_filtered)}/{len(df)} rows kept")
+            
+            if len(df_filtered) > 0:
+                # Save to Dataiku
+                output_file = input_file.replace('.xlsx', '_filtered.xlsx').replace('.xls', '_filtered.xlsx')
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_filtered.to_excel(writer, index=False)
+                
+                with OUTPUT_FOLDER.get_writer(output_file) as writer:
+                    writer.write(output.getvalue())
+                
+                print(f"  ✅ Saved: {output_file}")
+        
+        except Exception as e:
+            print(f"  ❌ Error processing {input_file}: {e}")
+
+# =============================================================================
+# EXECUTION
+# =============================================================================
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("🔍 RAW EXTRACTION FILTER TOOL")
-    print("="*60)
-    print("This tool filters raw extraction data where:")
-    print("  1. Regular_Count == Consecutive_Count")
-    print("  2. Regular_Count > 2 (excludes counts ≤ 2)")
-    print()
-    print("It helps identify financial table rows where:")
-    print("  - All regular numbers appear consecutively")
-    print("  - There are MORE THAN 2 regular numbers")
-    print("  - (Counts of 0, 1, or 2 are excluded)")
-    print("="*60)
-    
+    # Run the main conversion (recommended)
     main()
+    
+    # Alternatively, run the simple version:
+    # simple_filter()
