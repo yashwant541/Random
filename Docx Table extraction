@@ -1,0 +1,75 @@
+# ==========================================
+# DOCX → EXCEL (MULTI-SHEET)
+# DATAIKU | DOWNLOAD + UPLOAD STREAM
+# ==========================================
+
+import dataiku
+from dataiku import Folder
+import pandas as pd
+from docx import Document
+import io
+
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
+INPUT_FOLDER_ID = "INPUT_FOLDER_ID_HERE"
+OUTPUT_FOLDER_ID = "OUTPUT_FOLDER_ID_HERE"
+OUTPUT_EXCEL_NAME = "docx_tables.xlsx"
+
+# --------------------------------------------------
+# INIT FOLDERS
+# --------------------------------------------------
+input_folder = Folder(INPUT_FOLDER_ID)
+output_folder = Folder(OUTPUT_FOLDER_ID)
+
+# --------------------------------------------------
+# FIND DOCX FILES
+# --------------------------------------------------
+docx_files = [
+    f for f in input_folder.list_paths_in_partition()
+    if f.lower().endswith(".docx")
+]
+
+if not docx_files:
+    raise Exception("❌ No DOCX files found in input folder")
+
+# --------------------------------------------------
+# CREATE EXCEL IN MEMORY
+# --------------------------------------------------
+excel_buffer = io.BytesIO()
+
+with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+
+    table_counter = 1
+
+    for docx_path in docx_files:
+
+        # ---- DOWNLOAD STREAM ----
+        with input_folder.get_download_stream(docx_path) as ds:
+            document = Document(io.BytesIO(ds.read()))
+
+        for table in document.tables:
+
+            rows = []
+            for row in table.rows:
+                rows.append([cell.text.strip() for cell in row.cells])
+
+            if not rows:
+                continue
+
+            df = pd.DataFrame(rows)
+
+            sheet_name = f"Table_{table_counter}"
+            df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+
+            table_counter += 1
+
+# --------------------------------------------------
+# UPLOAD STREAM (WRITE EXCEL)
+# --------------------------------------------------
+excel_buffer.seek(0)
+
+with output_folder.upload_stream(OUTPUT_EXCEL_NAME) as us:
+    us.write(excel_buffer.read())
+
+print(f"✅ {table_counter - 1} tables extracted into {OUTPUT_EXCEL_NAME}")
