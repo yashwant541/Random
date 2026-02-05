@@ -1,34 +1,32 @@
 import dataiku
 from docx import Document
-import os
+from io import BytesIO
 
-# Get Dataiku folders
+# Dataiku folders
 input_folder = dataiku.Folder("input_folder")
 output_folder = dataiku.Folder("output_folder")
 
-# Get paths
-input_path = input_folder.get_path()
-output_path = output_folder.get_path()
+# Iterate through files in input folder
+for file_path in input_folder.list_paths_in_partition():
+    
+    if file_path.lower().endswith(".docx"):
+        print(f"Processing: {file_path}")
 
-# Loop through files in input folder
-for file_name in os.listdir(input_path):
-    if file_name.lower().endswith(".docx"):
-        docx_file_path = os.path.join(input_path, file_name)
+        # ---- DOWNLOAD STREAM ----
+        with input_folder.get_download_stream(file_path) as stream:
+            doc_bytes = stream.read()
 
-        # Read DOCX
-        document = Document(docx_file_path)
+        # Load DOCX from bytes
+        document = Document(BytesIO(doc_bytes))
 
         # Extract text
-        full_text = []
-        for para in document.paragraphs:
-            full_text.append(para.text)
+        text_lines = [para.text for para in document.paragraphs]
 
         # Output file name
-        txt_file_name = file_name.replace(".docx", ".txt")
-        txt_file_path = os.path.join(output_path, txt_file_name)
+        output_file_name = file_path.split("/")[-1].replace(".docx", ".txt")
 
-        # Write TXT
-        with open(txt_file_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(full_text))
+        # ---- UPLOAD STREAM ----
+        with output_folder.get_writer(output_file_name) as writer:
+            writer.write("\n".join(text_lines).encode("utf-8"))
 
-        print(f"Converted: {file_name} → {txt_file_name}")
+        print(f"Saved: {output_file_name}")
