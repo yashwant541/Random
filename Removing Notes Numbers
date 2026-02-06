@@ -29,10 +29,10 @@ END_NUMBER = 100.0       # End number (inclusive) - can be decimal
 PRESERVE_FORMATTING = True    # Keep original formatting where possible
 REMOVE_EMPTY_LINES = False    # Remove lines that become empty after processing
 LOG_PROCESSING = True         # Log what was removed
-INCLUDE_PERCENTAGES = True    # Treat percentages as numbers (25% = 0.25)
-INCLUDE_CURRENCY = True       # Treat currency as numbers ($25.50 = 25.50)
-INCLUDE_COMMAS = True         # Handle numbers with commas (1,000.50 = 1000.50)
-INCLUDE_SCIENTIFIC = True     # Handle scientific notation (1.23e4 = 12300)
+INCLUDE_PERCENTAGES = False    # Treat percentages as numbers (25% = 0.25)
+INCLUDE_CURRENCY = False       # Treat currency as numbers ($25.50 = 25.50)
+INCLUDE_COMMAS = False         # Handle numbers with commas (1,000.50 = 1000.50)
+INCLUDE_SCIENTIFIC = False     # Handle scientific notation (1.23e4 = 12300)
 
 # Number formats to consider
 NUMBER_PATTERNS = [
