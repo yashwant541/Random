@@ -1,849 +1,176 @@
 # =============================================================================
-# DATAIKU TEXT FILE PROCESSING - REMOVE STANDALONE NUMBERS (INCLUDING DECIMALS)
-# =============================================================================
-# Reads text files from Dataiku folder, removes standalone numbers 
-# (integers and decimals) between start and end numbers (inclusive), 
-# and saves cleaned files.
+# DATAIKU TEXT FILE PROCESSING - REMOVE STANDALONE NUMBERS (TAB SAFE)
 # =============================================================================
 
 import dataiku
 import re
 import os
-import decimal
-from typing import List, Optional, Tuple, Union
 from decimal import Decimal, InvalidOperation
+from typing import List, Tuple, Optional
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# Dataiku folder IDs
-INPUT_FOLDER_ID = "xFGhJtYE"           # Folder containing input text files
-OUTPUT_FOLDER_ID = "output_folder_id"  # Folder for cleaned text files
+INPUT_FOLDER_ID = "xFGhJtYE"
+OUTPUT_FOLDER_ID = "output_folder_id"
 
-# Processing configuration
-START_NUMBER = 1.0       # Start number (inclusive) - can be decimal
-END_NUMBER = 100.0       # End number (inclusive) - can be decimal
+START_NUMBER = 1
+END_NUMBER = 30
 
-# Additional options
-PRESERVE_FORMATTING = True    # Keep original formatting where possible
-REMOVE_EMPTY_LINES = False    # Remove lines that become empty after processing
-LOG_PROCESSING = True         # Log what was removed
-INCLUDE_PERCENTAGES = False    # Treat percentages as numbers (25% = 0.25)
-INCLUDE_CURRENCY = False       # Treat currency as numbers ($25.50 = 25.50)
-INCLUDE_COMMAS = False         # Handle numbers with commas (1,000.50 = 1000.50)
-INCLUDE_SCIENTIFIC = False     # Handle scientific notation (1.23e4 = 12300)
+INCLUDE_PERCENTAGES = True
+INCLUDE_CURRENCY = True
+INCLUDE_COMMAS = True
+INCLUDE_SCIENTIFIC = True
 
-# Number formats to consider
-NUMBER_PATTERNS = [
-    r'\d+',                          # Integers: 123
-    r'\d+\.\d+',                     # Decimals: 123.45
-    r'\.\d+',                        # Decimals without leading zero: .45
-    r'\d+\.',                        # Whole numbers with decimal point: 123.
-]
-
-if INCLUDE_COMMAS:
-    NUMBER_PATTERNS.extend([
-        r'\d{1,3}(?:,\d{3})+',       # Numbers with commas: 1,000
-        r'\d{1,3}(?:,\d{3})+\.\d+',  # Decimals with commas: 1,000.50
-        r'\d{1,3}(?:,\d{3})+\.',     # Whole numbers with commas and decimal: 1,000.
-    ])
-
-if INCLUDE_SCIENTIFIC:
-    NUMBER_PATTERNS.extend([
-        r'\d+(?:\.\d+)?[eE][+-]?\d+',  # Scientific notation: 1.23e4, 1.23E-4
-    ])
+REMOVE_EMPTY_LINES = False
+LOG_PROCESSING = True
 
 # =============================================================================
-# DATAIKU HELPER FUNCTIONS
+# DATAIKU HELPERS
 # =============================================================================
 
 def get_input_folder():
-    """Get Dataiku input folder object"""
-    try:
-        return dataiku.Folder(INPUT_FOLDER_ID)
-    except Exception as e:
-        print(f"❌ Error accessing input folder '{INPUT_FOLDER_ID}': {e}")
-        raise
+    return dataiku.Folder(INPUT_FOLDER_ID)
 
 def get_output_folder():
-    """Get Dataiku output folder object"""
-    try:
-        return dataiku.Folder(OUTPUT_FOLDER_ID)
-    except Exception as e:
-        print(f"❌ Error accessing output folder '{OUTPUT_FOLDER_ID}': {e}")
-        raise
-
-def list_text_files_in_folder() -> List[str]:
-    """
-    List all text files in the Dataiku input folder
-    """
-    folder = get_input_folder()
-    all_files = folder.list_paths_in_partition()
-    
-    # Filter for text files (common extensions)
-    text_extensions = ['.txt', '.text', '.log', '.csv', '.md', '.json', '.xml', '.yml', '.yaml']
-    text_files = [f for f in all_files if any(f.lower().endswith(ext) for ext in text_extensions)]
-    
-    print(f"📁 Found {len(text_files)} text file(s) in folder '{INPUT_FOLDER_ID}'")
-    return sorted(text_files)
-
-def read_text_file_from_dataiku(filename: str) -> str:
-    """
-    Read text file from Dataiku folder
-    """
-    folder = get_input_folder()
-    
-    print(f"📥 Reading text file from Dataiku: {filename}")
-    
-    try:
-        # Read file from Dataiku
-        with folder.get_download_stream(filename) as stream:
-            content_bytes = stream.read()
-        
-        # Try different encodings
-        encodings = ['utf-8', 'latin-1', 'cp1252', 'utf-16']
-        
-        for encoding in encodings:
-            try:
-                content = content_bytes.decode(encoding)
-                print(f"   ✅ Read {len(content):,} characters (encoding: {encoding})")
-                return content
-            except UnicodeDecodeError:
-                continue
-        
-        # If all fail, use utf-8 with ignore
-        content = content_bytes.decode('utf-8', errors='ignore')
-        print(f"   ⚠️ Read {len(content):,} characters (encoding: utf-8 with errors ignored)")
-        return content
-        
-    except Exception as e:
-        print(f"❌ Error reading file '{filename}' from Dataiku: {e}")
-        raise
-
-def save_text_to_dataiku(content: str, filename: str) -> None:
-    """
-    Save text content to Dataiku output folder
-    """
-    folder = get_output_folder()
-    
-    try:
-        # Encode string to bytes
-        content_bytes = content.encode('utf-8')
-        
-        # Save to Dataiku
-        with folder.get_writer(filename) as writer:
-            writer.write(content_bytes)
-        
-        print(f"✅ Successfully saved to Dataiku: {filename}")
-        print(f"   Saved {len(content):,} characters")
-        
-    except Exception as e:
-        print(f"❌ Error saving file '{filename}' to Dataiku: {e}")
-        raise
+    return dataiku.Folder(OUTPUT_FOLDER_ID)
 
 # =============================================================================
-# NUMBER PARSING AND DETECTION FUNCTIONS
+# NUMBER PARSING
 # =============================================================================
 
-def parse_number_string(number_str: str) -> Optional[Decimal]:
-    """
-    Parse a string into a Decimal number, handling various formats
-    
-    Args:
-        number_str: String containing a number
-        
-    Returns:
-        Decimal number or None if not a valid number
-    """
-    if not number_str:
-        return None
-    
-    # Clean the string
-    cleaned = number_str.strip()
-    
-    # Handle percentages (convert to decimal)
-    if INCLUDE_PERCENTAGES and cleaned.endswith('%'):
-        try:
-            # Remove percent sign and convert to decimal
-            without_percent = cleaned[:-1].strip()
-            # Parse as decimal and divide by 100
-            return Decimal(without_percent.replace(',', '')) / Decimal('100')
-        except (InvalidOperation, ValueError):
-            pass
-    
-    # Handle currency symbols
-    if INCLUDE_CURRENCY:
-        currency_symbols = ['$', '€', '£', '¥', '₹', '₽', '₩']
-        for symbol in currency_symbols:
-            if cleaned.startswith(symbol):
-                cleaned = cleaned[len(symbol):].strip()
-                break
-    
-    # Handle negative numbers in parentheses
-    if cleaned.startswith('(') and cleaned.endswith(')'):
-        cleaned = '-' + cleaned[1:-1]
-    
-    # Remove commas for parsing
-    if ',' in cleaned:
-        cleaned = cleaned.replace(',', '')
-    
-    # Handle scientific notation
-    if INCLUDE_SCIENTIFIC and ('e' in cleaned.lower()):
-        try:
-            # Convert scientific notation to Decimal
-            return Decimal(cleaned)
-        except (InvalidOperation, ValueError):
-            pass
-    
-    try:
-        return Decimal(cleaned)
-    except (InvalidOperation, ValueError):
-        return None
-
-def is_number_in_range(number_str: str, start_num: Decimal, end_num: Decimal) -> bool:
-    """
-    Check if a number string is within the specified range
-    
-    Args:
-        number_str: String containing a number
-        start_num: Start of range (inclusive, as Decimal)
-        end_num: End of range (inclusive, as Decimal)
-        
-    Returns:
-        True if number is in range
-    """
-    number = parse_number_string(number_str)
-    if number is None:
-        return False
-    
-    return start_num <= number <= end_num
-
-def is_standalone_number(text: str, line: str, position: int) -> bool:
-    """
-    Check if a number is standalone (not part of a larger word or sentence)
-    
-    Args:
-        text: The number text to check
-        line: The line containing the number
-        position: Position of the number match in the line
-        
-    Returns:
-        True if the number is standalone
-    """
+def parse_number_string(text: str) -> Optional[Decimal]:
     if not text:
-        return False
-    
-    # Check if number is at the beginning of line
-    if position == 0:
-        # Check what comes after the number
-        after_number = line[position + len(text):]
-        if after_number and after_number[0].isalnum() and after_number[0] not in '%':
-            return False
-        return True
-    
-    # Check if number is at the end of line
-    if position + len(text) == len(line):
-        # Check what comes before the number
-        before_number = line[:position]
-        if before_number and before_number[-1].isalnum():
-            return False
-        return True
-    
-    # Check characters before and after the number
-    char_before = line[position - 1] if position > 0 else ' '
-    char_after = line[position + len(text)] if position + len(text) < len(line) else ' '
-    
-    # Special handling for currency and percentage
-    if INCLUDE_CURRENCY and char_before in ['$', '€', '£', '¥', '₹', '₽', '₩']:
-        # If preceded by currency symbol, check if it's standalone
-        if position > 1:
-            char_before_symbol = line[position - 2] if position > 1 else ' '
-            return not (char_before_symbol.isalnum() or char_after.isalnum())
-        return not char_after.isalnum()
-    
-    if INCLUDE_PERCENTAGES and char_after == '%':
-        # If followed by percent sign, check character after percent
-        char_after_percent = line[position + len(text) + 1] if position + len(text) + 1 < len(line) else ' '
-        return not (char_before.isalnum() or (char_after_percent and char_after_percent.isalnum()))
-    
-    # A number is standalone if it's surrounded by non-alphanumeric characters
-    # or whitespace (not part of a word)
-    return not (char_before.isalnum() or char_after.isalnum())
+        return None
+
+    s = text.strip()
+
+    if INCLUDE_PERCENTAGES and s.endswith('%'):
+        try:
+            return Decimal(s[:-1].replace(',', '')) / Decimal('100')
+        except InvalidOperation:
+            return None
+
+    if INCLUDE_CURRENCY:
+        for c in ['$', '€', '£', '¥', '₹', '₽', '₩']:
+            if s.startswith(c):
+                s = s[len(c):].strip()
+                break
+
+    if s.startswith('(') and s.endswith(')'):
+        s = '-' + s[1:-1]
+
+    s = s.replace(',', '')
+
+    try:
+        return Decimal(s)
+    except InvalidOperation:
+        return None
+
+def is_number_in_range(text: str, start: Decimal, end: Decimal) -> bool:
+    val = parse_number_string(text)
+    return val is not None and start <= val <= end
+
+# =============================================================================
+# REGEX (CRITICAL FIX)
+# =============================================================================
 
 def get_number_pattern() -> re.Pattern:
-    """
-    Create a regex pattern to match numbers based on configuration
-    
-    Returns:
-        Compiled regex pattern
-    """
-    # Combine all patterns with optional currency and percentage
-    patterns = []
-    
-    for base_pattern in NUMBER_PATTERNS:
-        pattern = base_pattern
-        
-        # Add optional currency prefix
-        if INCLUDE_CURRENCY:
-            pattern = r'(?:[$€£¥₹₽₩]\s*)?' + pattern
-        
-        # Add optional percentage suffix
-        if INCLUDE_PERCENTAGES:
-            pattern = pattern + r'(?:\s*%)?'
-        
-        # Handle negative numbers (with minus sign or parentheses)
-        pattern = r'(?:-?\s*)?' + pattern  # Optional minus sign
-        pattern = r'(?:\(\s*' + pattern + r'\s*\))?'  # Optional parentheses
-        
-        patterns.append(pattern)
-    
-    # Combine with word boundaries
-    combined_pattern = r'\b(?:' + '|'.join(patterns) + r')\b'
-    
-    return re.compile(combined_pattern)
+    number_core = r'''
+        -?
+        (?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)
+        (?:\.\d+)?
+        (?:[eE][+-]?\d+)?
+    '''
+
+    if INCLUDE_CURRENCY:
+        number_core = r'(?:[$€£¥₹₽₩]\s*)?' + number_core
+
+    if INCLUDE_PERCENTAGES:
+        number_core += r'(?:\s*%)?'
+
+    # Standalone = surrounded by whitespace (TAB SAFE)
+    return re.compile(rf'(?<!\S){number_core}(?!\S)', re.VERBOSE)
 
 # =============================================================================
-# CORE TEXT PROCESSING FUNCTIONS
+# CORE LOGIC
 # =============================================================================
 
-def remove_standalone_numbers(text_content: str, start_num: Decimal, end_num: Decimal, 
-                             preserve_formatting: bool = True, 
-                             remove_empty_lines: bool = False,
-                             log_processing: bool = True) -> Tuple[str, List[dict]]:
-    """
-    Remove standalone numbers (including decimals) between start and end numbers
-    
-    Args:
-        text_content: Original text content
-        start_num: Start number (inclusive, as Decimal)
-        end_num: End number (inclusive, as Decimal)
-        preserve_formatting: Try to maintain original formatting
-        remove_empty_lines: Remove lines that become empty
-        log_processing: Log what numbers were removed
-        
-    Returns:
-        Tuple of (cleaned_text, list_of_removed_numbers_info)
-    """
-    if not text_content:
-        return "", []
-    
-    lines = text_content.splitlines(True)  # Keep line endings
-    cleaned_lines = []
-    removed_numbers = []
-    
-    print(f"🔍 Processing numbers from {start_num} to {end_num}")
-    print(f"   Including: decimals, {', percentages' if INCLUDE_PERCENTAGES else ''}"
-          f"{', currency' if INCLUDE_CURRENCY else ''}"
-          f"{', commas' if INCLUDE_COMMAS else ''}"
-          f"{', scientific notation' if INCLUDE_SCIENTIFIC else ''}")
-    
-    # Get the number pattern
-    number_pattern = get_number_pattern()
-    
-    for line_idx, line in enumerate(lines):
-        original_line = line
-        
-        # Find all number matches in this line
-        matches = list(number_pattern.finditer(line))
-        
-        if not matches:
-            # No numbers in this line, keep as is
-            if not (remove_empty_lines and line.strip() == ''):
-                cleaned_lines.append(line)
-            continue
-        
-        # Process matches from end to beginning to avoid index shifting
-        modified_line = line
-        offset = 0  # Track offset due to previous removals
-        
-        for match in reversed(matches):
-            number_text = match.group()
-            
-            # Check if number is in the target range
-            if is_number_in_range(number_text, start_num, end_num):
-                # Check if it's a standalone number
-                start_pos = match.start() - offset
-                end_pos = match.end() - offset
-                
-                # Extract the relevant part for checking standalone status
-                line_for_check = modified_line
-                
-                if is_standalone_number(number_text, line_for_check, start_pos):
-                    # Parse the number for logging
-                    parsed_number = parse_number_string(number_text)
-                    
-                    # Remove the standalone number
-                    before = modified_line[:start_pos]
-                    after = modified_line[end_pos:]
-                    
-                    # Determine what to replace with
-                    if preserve_formatting:
-                        # Try to maintain spacing
-                        # Check surrounding characters
-                        if start_pos > 0 and end_pos < len(modified_line):
-                            char_before = modified_line[start_pos - 1]
-                            char_after = modified_line[end_pos]
-                            
-                            # Handle common punctuation and spacing
-                            if char_before.isspace() and char_after.isspace():
-                                # Remove number and one space if possible
-                                if after.startswith(' '):
-                                    after = after[1:]
-                            elif char_before in ['.', ',', ';', ':'] and char_after.isspace():
-                                # Keep punctuation before number
-                                pass
-                            elif char_before.isspace() and char_after in ['.', ',', ';', ':']:
-                                # Keep punctuation after number
-                                pass
-                    
-                    modified_line = before + after
-                    offset += len(number_text)
-                    
-                    if log_processing:
-                        removed_info = {
-                            'text': number_text,
-                            'parsed': str(parsed_number) if parsed_number else number_text,
-                            'line': line_idx + 1,
-                            'position': start_pos + 1
-                        }
-                        removed_numbers.append(removed_info)
-                        
-                        parsed_str = f" ({parsed_number})" if parsed_number and parsed_number != Decimal(number_text.replace(',', '')) else ""
-                        print(f"   Removed standalone number: {number_text}{parsed_str} (line {line_idx + 1})")
-        
-        # Check if line is now empty
-        if remove_empty_lines and modified_line.strip() == '':
-            continue
-        
-        cleaned_lines.append(modified_line)
-    
-    # Join all lines back together
-    cleaned_text = ''.join(cleaned_lines)
-    
-    if log_processing and removed_numbers:
-        # Group by number value
-        number_counts = {}
-        for item in removed_numbers:
-            key = item['parsed']
-            number_counts[key] = number_counts.get(key, 0) + 1
-        
-        print(f"\n📊 Removed {len(removed_numbers)} standalone number(s)")
-        print(f"   Unique values removed: {len(number_counts)}")
-        
-        # Show most common removed numbers
-        sorted_counts = sorted(number_counts.items(), key=lambda x: x[1], reverse=True)
-        for num_str, count in sorted_counts[:10]:
-            print(f"     {num_str}: {count} time(s)")
-        
-        if len(sorted_counts) > 10:
-            print(f"     ... and {len(sorted_counts) - 10} more unique values")
-    
-    return cleaned_text, removed_numbers
+def remove_numbers_from_text(text: str,
+                             start: Decimal,
+                             end: Decimal) -> Tuple[str, List[str]]:
 
-def process_single_text_file(filename: str, start_num: Decimal, end_num: Decimal) -> Tuple[str, List[dict]]:
-    """
-    Process a single text file: read, clean, and return cleaned content
-    
-    Args:
-        filename: Name of text file in Dataiku folder
-        start_num: Start number (inclusive, as Decimal)
-        end_num: End number (inclusive, as Decimal)
-        
-    Returns:
-        Tuple of (cleaned_content, removed_numbers_info)
-    """
-    print(f"\n🎯 Processing: {filename}")
-    print(f"{'-'*50}")
-    
-    # Read file from Dataiku
-    original_content = read_text_file_from_dataiku(filename)
-    
-    # Process the content
-    cleaned_content, removed_numbers = remove_standalone_numbers(
-        original_content,
-        start_num,
-        end_num,
-        preserve_formatting=PRESERVE_FORMATTING,
-        remove_empty_lines=REMOVE_EMPTY_LINES,
-        log_processing=LOG_PROCESSING
-    )
-    
-    # Calculate statistics
-    original_length = len(original_content)
-    cleaned_length = len(cleaned_content)
-    reduction = original_length - cleaned_length
-    reduction_percent = (reduction / original_length * 100) if original_length > 0 else 0
-    
-    # Calculate total characters removed (including symbols)
-    chars_removed = sum(len(item['text']) for item in removed_numbers)
-    
-    print(f"\n📊 File Statistics:")
-    print(f"   Original size: {original_length:,} characters")
-    print(f"   Cleaned size:  {cleaned_length:,} characters")
-    print(f"   Reduction:     {reduction:,} characters ({reduction_percent:.1f}%)")
-    print(f"   Numbers removed: {len(removed_numbers)}")
-    print(f"   Characters removed: {chars_removed:,}")
-    
-    # Show preview of changes
-    if removed_numbers and LOG_PROCESSING:
-        print(f"\n🔍 Sample of removed content:")
-        # Find lines where numbers were removed
-        original_lines = original_content.splitlines()
-        cleaned_lines = cleaned_content.splitlines()
-        
-        changes_shown = 0
-        for i, (orig_line, clean_line) in enumerate(zip(original_lines, cleaned_lines)):
-            if orig_line != clean_line and changes_shown < 3:
-                print(f"   Line {i + 1}:")
-                print(f"     Original: '{orig_line[:80]}{'...' if len(orig_line) > 80 else ''}'")
-                print(f"     Cleaned:  '{clean_line[:80]}{'...' if len(clean_line) > 80 else ''}'")
-                print()
-                changes_shown += 1
-        
-        if len(removed_numbers) > changes_shown:
-            print(f"     ... and {len(removed_numbers) - changes_shown} more changes")
-    
-    return cleaned_content, removed_numbers
+    pattern = get_number_pattern()
+    removed = []
+
+    lines = text.splitlines(True)
+    output = []
+
+    for line in lines:
+        matches = list(pattern.finditer(line))
+        new_line = line
+
+        for m in reversed(matches):
+            token = m.group()
+
+            if is_number_in_range(token, start, end):
+                removed.append(token)
+                new_line = new_line[:m.start()] + new_line[m.end():]
+
+        # ---- TAB & SPACE CLEANUP (TXT SAFE) ----
+        new_line = re.sub(r'\t{2,}', '\t', new_line)
+        new_line = re.sub(r' {2,}', ' ', new_line)
+        new_line = new_line.strip(' \t')
+
+        if not (REMOVE_EMPTY_LINES and new_line.strip() == ''):
+            output.append(new_line)
+
+    return ''.join(output), removed
 
 # =============================================================================
-# BATCH PROCESSING FUNCTION
+# FILE PROCESSING
 # =============================================================================
 
-def batch_process_text_files():
-    """
-    Process all text files in the Dataiku input folder
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TEXT PROCESSING - REMOVE STANDALONE NUMBERS")
-    print(f"{'='*60}")
-    print(f"Input folder:  {INPUT_FOLDER_ID}")
-    print(f"Output folder: {OUTPUT_FOLDER_ID}")
-    print(f"Number range:  {START_NUMBER} to {END_NUMBER} (inclusive)")
-    print(f"Including: decimals, percentages, currency, commas, scientific notation")
-    print(f"{'='*60}")
-    
-    # List all text files
-    text_files = list_text_files_in_folder()
-    
-    if not text_files:
-        print("❌ No text files found in input folder.")
-        return []
-    
-    print(f"📁 Found {len(text_files)} text file(s):")
-    for i, filename in enumerate(text_files, 1):
-        print(f"   {i}. {filename}")
-    
-    print(f"\n🚀 Starting batch processing...")
-    print(f"{'='*60}")
-    
-    # Convert start and end to Decimal for precise comparison
-    start_decimal = Decimal(str(START_NUMBER))
-    end_decimal = Decimal(str(END_NUMBER))
-    
-    # Process each file
-    results = []
-    for filename in text_files:
-        print(f"\n🎯 Processing: {filename}")
-        
-        try:
-            # Process the file
-            cleaned_content, removed_numbers = process_single_text_file(
-                filename, start_decimal, end_decimal
-            )
-            
-            # Create output filename
-            name_parts = os.path.splitext(filename)
-            output_filename = f"{name_parts[0]}_cleaned{name_parts[1] if name_parts[1] else '.txt'}"
-            
-            # Save cleaned file to Dataiku
-            save_text_to_dataiku(cleaned_content, output_filename)
-            
-            # Record results
-            chars_removed = sum(len(item['text']) for item in removed_numbers)
-            results.append({
-                'input_file': filename,
-                'output_file': output_filename,
-                'numbers_removed': len(removed_numbers),
-                'characters_removed': chars_removed,
-                'unique_numbers': len(set(item['parsed'] for item in removed_numbers)),
-                'status': 'success'
-            })
-            
-        except Exception as e:
-            print(f"❌ Error processing {filename}: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append({
-                'input_file': filename,
-                'error': str(e),
-                'status': 'error'
-            })
-        
-        if filename != text_files[-1]:
-            print(f"\n{'-'*60}")
-    
-    # Generate summary
-    print(f"\n{'='*60}")
-    print("BATCH PROCESSING SUMMARY")
-    print(f"{'='*60}")
-    
-    successful = [r for r in results if r['status'] == 'success']
-    errors = [r for r in results if r['status'] == 'error']
-    
-    print(f"📊 Results:")
-    print(f"   Total files processed: {len(results)}")
-    print(f"   Successfully cleaned: {len(successful)}")
-    print(f"   Errors: {len(errors)}")
-    
-    if successful:
-        total_numbers = sum(r.get('numbers_removed', 0) for r in successful)
-        total_chars = sum(r.get('characters_removed', 0) for r in successful)
-        total_unique = sum(r.get('unique_numbers', 0) for r in successful)
-        
-        print(f"\n✅ Removed {total_numbers} standalone numbers")
-        print(f"   Total characters removed: {total_chars:,}")
-        print(f"   Unique number values removed: {total_unique}")
-        
-        print(f"\n📁 Output files created in '{OUTPUT_FOLDER_ID}' folder:")
-        for result in successful:
-            print(f"   • {result['output_file']} ({result['numbers_removed']} numbers, {result['characters_removed']} chars)")
-    
-    if errors:
-        print(f"\n❌ Files with errors:")
-        for result in errors:
-            print(f"   • {result['input_file']}: {result['error'][:100]}")
-    
-    return results
+def process_file(filename: str, start: Decimal, end: Decimal):
+    input_folder = get_input_folder()
+    output_folder = get_output_folder()
+
+    with input_folder.get_download_stream(filename) as f:
+        raw = f.read().decode('utf-8', errors='ignore')
+
+    cleaned, removed = remove_numbers_from_text(raw, start, end)
+
+    out_name = os.path.splitext(filename)[0] + "_cleaned.txt"
+
+    with output_folder.get_writer(out_name) as w:
+        w.write(cleaned.encode('utf-8'))
+
+    print(f"✅ {filename} → {out_name} | removed {len(removed)} numbers")
 
 # =============================================================================
-# ADVANCED PROCESSING AND TESTING FUNCTIONS
-# =============================================================================
-
-def test_number_parsing():
-    """
-    Test the number parsing functionality
-    """
-    test_cases = [
-        "123",           # Integer
-        "123.45",        # Decimal
-        ".45",           # Decimal without leading zero
-        "1,000",         # Number with comma
-        "1,000.50",      # Decimal with comma
-        "$123.45",       # Currency
-        "25%",           # Percentage
-        "1.23e4",        # Scientific notation
-        "-123.45",       # Negative decimal
-        "(123.45)",      # Negative in parentheses
-        "€1,000.50",     # Euro with comma
-        "100%",          # 100 percent
-        "0.5",           # Decimal less than 1
-    ]
-    
-    print("🧪 Testing number parsing:")
-    print("-" * 50)
-    
-    for test in test_cases:
-        parsed = parse_number_string(test)
-        if parsed is not None:
-            print(f"  '{test}' -> {parsed}")
-        else:
-            print(f"  '{test}' -> Could not parse")
-
-def find_numbers_in_file(filename: str) -> List[dict]:
-    """
-    Find and display all numbers in a file without removing them
-    """
-    print(f"\n🔍 Scanning for numbers in {filename}")
-    
-    try:
-        # Read file
-        content = read_text_file_from_dataiku(filename)
-        
-        # Get number pattern
-        number_pattern = get_number_pattern()
-        
-        # Find all numbers
-        lines = content.splitlines()
-        all_numbers = []
-        
-        for line_idx, line in enumerate(lines):
-            matches = list(number_pattern.finditer(line))
-            for match in matches:
-                number_text = match.group()
-                parsed = parse_number_string(number_text)
-                
-                number_info = {
-                    'text': number_text,
-                    'parsed': str(parsed) if parsed else number_text,
-                    'line': line_idx + 1,
-                    'position': match.start() + 1,
-                    'standalone': is_standalone_number(number_text, line, match.start()),
-                    'in_range': is_number_in_range(number_text, 
-                                                  Decimal(str(START_NUMBER)), 
-                                                  Decimal(str(END_NUMBER)))
-                }
-                all_numbers.append(number_info)
-        
-        # Display results
-        print(f"\n📊 Found {len(all_numbers)} number(s) in file:")
-        
-        # Group by type
-        standalone_in_range = [n for n in all_numbers if n['standalone'] and n['in_range']]
-        standalone_not_in_range = [n for n in all_numbers if n['standalone'] and not n['in_range']]
-        not_standalone = [n for n in all_numbers if not n['standalone']]
-        
-        print(f"   Standalone numbers in range ({START_NUMBER}-{END_NUMBER}): {len(standalone_in_range)}")
-        print(f"   Standalone numbers NOT in range: {len(standalone_not_in_range)}")
-        print(f"   Numbers that are NOT standalone (part of text): {len(not_standalone)}")
-        
-        # Show examples
-        if standalone_in_range:
-            print(f"\n🔍 Examples of standalone numbers IN RANGE (would be removed):")
-            for num in standalone_in_range[:5]:
-                print(f"   Line {num['line']}: '{num['text']}' -> {num['parsed']}")
-        
-        if not_standalone:
-            print(f"\n🔍 Examples of numbers NOT STANDALONE (would NOT be removed):")
-            for num in not_standalone[:5]:
-                print(f"   Line {num['line']}: '{num['text']}' (part of text)")
-        
-        return all_numbers
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return []
-
-# =============================================================================
-# SIMPLE VERSION FOR QUICK USE
-# =============================================================================
-
-def simple_remove_numbers():
-    """
-    Simple version for quick text file processing with decimal support
-    """
-    print("Starting text file processing (with decimal support)...")
-    
-    # Get folders
-    input_folder = dataiku.Folder(INPUT_FOLDER_ID)
-    output_folder = dataiku.Folder(OUTPUT_FOLDER_ID)
-    
-    # List text files
-    all_files = input_folder.list_paths_in_partition()
-    text_files = [f for f in all_files if f.lower().endswith('.txt')]
-    
-    if not text_files:
-        print("No .txt files found!")
-        return
-    
-    print(f"Found {len(text_files)} .txt file(s)")
-    
-    # Create pattern for numbers with decimals
-    # This pattern matches: 123, 123.45, .45, 1,000, 1,000.50, $123, 25%
-    pattern = re.compile(
-        r'(?<!\w)(?:[$€£¥]?\s*)?'  # Optional currency symbol
-        r'(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?'  # Number (with optional commas and decimals)
-        r'(?:\s*%)?'  # Optional percentage
-        r'(?!\w)'  # Not followed by word character
-    )
-    
-    for filename in text_files:
-        print(f"\nProcessing: {filename}")
-        
-        try:
-            # Read file
-            with input_folder.get_download_stream(filename) as stream:
-                content_bytes = stream.read()
-            content = content_bytes.decode('utf-8', errors='ignore')
-            
-            def should_remove(match):
-                num_str = match.group()
-                
-                # Remove currency and percent for parsing
-                clean_num = num_str.replace('$', '').replace('€', '').replace('£', '').replace('¥', '')
-                clean_num = clean_num.replace('%', '').replace(',', '')
-                
-                try:
-                    # Try to parse as float
-                    num = float(clean_num)
-                    
-                    # Handle percentages (convert to decimal)
-                    if '%' in num_str:
-                        num = num / 100.0
-                    
-                    # Check if in range
-                    return START_NUMBER <= num <= END_NUMBER
-                except ValueError:
-                    return False
-            
-            # Remove numbers that should be removed
-            cleaned_content = pattern.sub(
-                lambda m: '' if should_remove(m) else m.group(),
-                content
-            )
-            
-            # Save output
-            output_filename = filename.replace('.txt', '_cleaned.txt')
-            with output_folder.get_writer(output_filename) as writer:
-                writer.write(cleaned_content.encode('utf-8'))
-            
-            print(f"  ✅ Saved: {output_filename}")
-            
-        except Exception as e:
-            print(f"  ❌ Error: {e}")
-
-# =============================================================================
-# MAIN FUNCTION FOR DATAiku
+# BATCH RUN
 # =============================================================================
 
 def run():
-    """
-    Main function for Dataiku recipes
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TEXT PROCESSING TOOL")
-    print(f"{'='*60}")
-    print("Removes standalone numbers (including decimals) between specified range")
-    print()
-    print(f"Configuration:")
-    print(f"  Input folder:  {INPUT_FOLDER_ID}")
-    print(f"  Output folder: {OUTPUT_FOLDER_ID}")
-    print(f"  Number range:  {START_NUMBER} to {END_NUMBER}")
-    print(f"  Include percentages: {INCLUDE_PERCENTAGES}")
-    print(f"  Include currency: {INCLUDE_CURRENCY}")
-    print(f"  Include commas: {INCLUDE_COMMAS}")
-    print(f"  Include scientific notation: {INCLUDE_SCIENTIFIC}")
-    print(f"{'='*60}")
-    
-    # Optional: Run test
-    # test_number_parsing()
-    
-    try:
-        # Run batch processing
-        results = batch_process_text_files()
-        
-        if results:
-            successful = any(r.get('status') == 'success' for r in results)
-            if successful:
-                print(f"\n✅ PROCESSING COMPLETE!")
-                print(f"   Check output folder '{OUTPUT_FOLDER_ID}' for results")
-            else:
-                print(f"\n⚠️ No files were successfully processed")
-        
-    except Exception as e:
-        print(f"\n❌ An unexpected error occurred: {e}")
-        raise
+    input_folder = get_input_folder()
+    files = [f for f in input_folder.list_paths_in_partition() if f.lower().endswith('.txt')]
+
+    if not files:
+        print("❌ No TXT files found")
+        return
+
+    start = Decimal(str(START_NUMBER))
+    end = Decimal(str(END_NUMBER))
+
+    for f in files:
+        process_file(f, start, end)
+
+    print("\n🎉 Processing complete")
 
 # =============================================================================
-# DATAiku RECIPE ENTRY POINT
+# ENTRY POINT
 # =============================================================================
 
 if __name__ == "__main__":
-    # Run the main function (recommended)
     run()
-    
-    # Alternative: Run simple version
-    # simple_remove_numbers()
-    
-    # Alternative: Just scan a file to see what would be removed
-    # find_numbers_in_file("example.txt")
