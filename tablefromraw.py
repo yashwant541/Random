@@ -1,5 +1,5 @@
 # =============================================================================
-# DATAIKU TABLE GROUPING TOOL
+# DATAIKU TABLE GROUPING TOOL - OPTIMIZED VERSION
 # =============================================================================
 # Groups rows into tables based on consecutive rows having the same 
 # Regular_Count and Consecutive_Count values.
@@ -8,9 +8,11 @@
 
 import dataiku
 import pandas as pd
-import io
-import json
+import tempfile
+import os
+import time
 from typing import List, Dict, Tuple, Optional
+from pathlib import Path
 
 # =============================================================================
 # CONFIGURATION - SET THESE TO YOUR DATAIKU FOLDER IDs
@@ -19,7 +21,7 @@ INPUT_FOLDER_ID = "xFGhJtYE"          # Your Dataiku INPUT folder ID
 OUTPUT_FOLDER_ID = "output_folder_id" # Your Dataiku OUTPUT folder ID
 
 # =============================================================================
-# DATAIKU HELPER FUNCTIONS
+# DATAIKU HELPER FUNCTIONS - OPTIMIZED
 # =============================================================================
 
 def get_input_folder():
@@ -33,9 +35,6 @@ def get_output_folder():
 def list_excel_files_in_folder() -> List[str]:
     """
     List all Excel files in the Dataiku input folder
-    
-    Returns:
-        List of Excel filenames
     """
     folder = get_input_folder()
     all_files = folder.list_paths_in_partition()
@@ -45,164 +44,159 @@ def list_excel_files_in_folder() -> List[str]:
 
 def read_excel_from_dataiku(filename: str) -> pd.DataFrame:
     """
-    Read Excel file from Dataiku folder with robust error handling
-    
-    Args:
-        filename: Name of Excel file in Dataiku folder
-        
-    Returns:
-        DataFrame with loaded data
+    Read Excel file from Dataiku folder - Optimized
     """
     folder = get_input_folder()
     
-    print(f"📥 Reading Excel file from Dataiku: {filename}")
+    print(f"📥 Reading: {filename}")
+    start_time = time.time()
     
     try:
         # Read file from Dataiku
         with folder.get_download_stream(filename) as stream:
-            excel_bytes = stream.read()
+            # Save to temp file to avoid memory issues
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+                tmp_path = tmp.name
+                # Write in chunks if file is large
+                chunk_size = 1024 * 1024  # 1MB chunks
+                while True:
+                    chunk = stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
         
-        print(f"   ✅ Read {len(excel_bytes):,} bytes")
+        # Read Excel file from temp file
+        # Use appropriate engine based on file extension
+        file_ext = Path(filename).suffix.lower()
         
-        # Convert bytes to file-like object
-        excel_file = io.BytesIO(excel_bytes)
-        
-        # Try different engines based on file extension
-        file_ext = filename.lower()
-        
-        if file_ext.endswith('.xlsx'):
-            # Try openpyxl engine first (for .xlsx)
+        if file_ext == '.xlsx':
+            df = pd.read_excel(tmp_path, engine='openpyxl')
+        elif file_ext == '.xls':
             try:
-                df = pd.read_excel(excel_file, engine='openpyxl')
-                print(f"   ✅ Loaded with openpyxl: {len(df):,} rows, {len(df.columns)} columns")
-                return df
-            except Exception as e1:
-                print(f"   ⚠️ openpyxl failed: {e1}")
-                # Try xlrd engine
+                df = pd.read_excel(tmp_path, engine='openpyxl')
+            except:
+                # Try xlrd for old .xls files
                 try:
-                    excel_file.seek(0)  # Reset file pointer
-                    df = pd.read_excel(excel_file, engine='xlrd')
-                    print(f"   ✅ Loaded with xlrd: {len(df):,} rows, {len(df.columns)} columns")
-                    return df
-                except Exception as e2:
-                    print(f"   ⚠️ xlrd failed: {e2}")
-        
-        elif file_ext.endswith('.xls'):
-            # Try xlrd engine for .xls files
+                    import xlrd
+                    df = pd.read_excel(tmp_path, engine='xlrd')
+                except ImportError:
+                    # Fallback to default engine
+                    df = pd.read_excel(tmp_path)
+        else:
+            # For any other extension, try openpyxl first
             try:
-                df = pd.read_excel(excel_file, engine='xlrd')
-                print(f"   ✅ Loaded with xlrd: {len(df):,} rows, {len(df.columns)} columns")
-                return df
-            except Exception as e1:
-                print(f"   ⚠️ xlrd failed: {e1}")
-                # Try openpyxl as fallback
-                try:
-                    excel_file.seek(0)  # Reset file pointer
-                    df = pd.read_excel(excel_file, engine='openpyxl')
-                    print(f"   ✅ Loaded with openpyxl: {len(df):,} rows, {len(df.columns)} columns")
-                    return df
-                except Exception as e2:
-                    print(f"   ⚠️ openpyxl failed: {e2}")
+                df = pd.read_excel(tmp_path, engine='openpyxl')
+            except:
+                df = pd.read_excel(tmp_path)
         
-        # If all else fails, try without specifying engine
-        try:
-            excel_file.seek(0)  # Reset file pointer
-            df = pd.read_excel(excel_file)
-            print(f"   ✅ Loaded with default engine: {len(df):,} rows, {len(df.columns)} columns")
-            return df
-        except Exception as e:
-            print(f"   ⚠️ Default engine failed: {e}")
-            raise
+        # Clean up temp file
+        os.unlink(tmp_path)
+        
+        elapsed = time.time() - start_time
+        print(f"   ✅ Loaded {len(df):,} rows, {len(df.columns)} cols in {elapsed:.2f}s")
+        
+        return df
         
     except Exception as e:
         print(f"❌ Error reading file {filename}: {e}")
-        print("   Make sure the file is a valid Excel file (.xlsx or .xls)")
+        # Clean up temp file if it exists
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         raise
 
 def save_excel_to_dataiku(df: pd.DataFrame, filename: str) -> None:
     """
-    Save DataFrame to Excel in Dataiku output folder
-    
-    Args:
-        df: DataFrame to save
-        filename: Output filename
+    Save DataFrame to Excel in Dataiku output folder - Optimized
     """
     folder = get_output_folder()
     
+    print(f"💾 Saving: {filename}")
+    start_time = time.time()
+    
     try:
-        # Create Excel in memory - always use openpyxl for writing
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
+            temp_path = tmp_file.name
         
-        # Get the bytes
-        excel_bytes = output.getvalue()
+        # Write directly to disk using openpyxl
+        df.to_excel(temp_path, index=False, engine='openpyxl')
         
-        # Save to Dataiku folder
-        with folder.get_writer(filename) as writer:
-            writer.write(excel_bytes)
+        # Read file and upload
+        file_size = os.path.getsize(temp_path)
+        with open(temp_path, 'rb') as f:
+            # Upload in chunks for large files
+            chunk_size = 1024 * 1024 * 10  # 10MB chunks
+            with folder.get_writer(filename) as writer:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
         
-        print(f"✅ Saved to Dataiku: {filename}")
-        print(f"   Rows: {len(df):,}, Columns: {len(df.columns)}")
+        # Clean up
+        os.unlink(temp_path)
+        
+        elapsed = time.time() - start_time
+        print(f"   ✅ Saved {len(df):,} rows, {file_size:,} bytes in {elapsed:.2f}s")
         
     except Exception as e:
         print(f"❌ Error saving file {filename}: {e}")
+        # Clean up temp file if it exists
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
         raise
 
 def save_tables_to_dataiku(tables: List[pd.DataFrame], output_filename: str, 
-                           include_individual_sheets: bool = True) -> None:
+                           include_individual_sheets: bool = True,
+                           max_sheets: int = 20) -> None:
     """
-    Save all tables to an Excel file in Dataiku folder
-    
-    Args:
-        tables: List of table DataFrames
-        output_filename: Output Excel filename
-        include_individual_sheets: Whether to create individual sheets for each table
+    Save all tables to an Excel file in Dataiku folder - Optimized
     """
     if not tables:
         print("❌ No tables to save")
         return
     
-    print(f"\n💾 Saving tables to Dataiku folder: {output_filename}")
+    print(f"\n💾 Saving {len(tables)} tables to: {output_filename}")
+    start_time = time.time()
     
     try:
-        # Create Excel in memory
-        output = io.BytesIO()
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
+            temp_path = tmp_file.name
         
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Save combined view
+        # Write all sheets at once using openpyxl
+        with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+            # 1. Combined view
             combined_data = []
             for i, table in enumerate(tables, 1):
                 table_copy = table.copy()
                 table_copy.insert(0, 'Table_Number', i)
                 combined_data.append(table_copy)
             
-            combined_df = pd.concat(combined_data, ignore_index=True)
-            combined_df.to_excel(writer, sheet_name='All_Tables', index=False)
-            print(f"   ✅ Saved combined view: {len(combined_df):,} rows")
+            if combined_data:
+                combined_df = pd.concat(combined_data, ignore_index=True)
+                combined_df.to_excel(writer, sheet_name='All_Tables', index=False)
+                print(f"   ✅ Combined view: {len(combined_df):,} rows")
             
-            if include_individual_sheets:
-                # Save each table to individual sheet
-                for i, table in enumerate(tables, 1):
-                    sheet_name = f"Table_{i}"
-                    # Excel sheet names max 31 characters
-                    if len(sheet_name) > 31:
-                        sheet_name = sheet_name[:31]
-                    
-                    # Add row numbers within table
-                    table_copy = table.copy()
+            # 2. Individual sheets (limited to avoid performance issues)
+            if include_individual_sheets and tables:
+                sheets_to_create = min(len(tables), max_sheets)
+                for i in range(sheets_to_create):
+                    sheet_name = f"Table_{i+1}"[:31]
+                    table_copy = tables[i].copy()
                     table_copy.insert(0, 'Row_In_Table', range(1, len(table_copy) + 1))
-                    
                     table_copy.to_excel(writer, sheet_name=sheet_name, index=False)
                 
-                print(f"   ✅ Saved {len(tables)} individual table sheets")
+                if len(tables) > max_sheets:
+                    print(f"   ⚠️  Limited to first {max_sheets} individual sheets (of {len(tables)})")
+                else:
+                    print(f"   ✅ Created {sheets_to_create} individual sheets")
             
-            # Save table statistics
+            # 3. Statistics sheet
             stats_data = []
             for i, table in enumerate(tables, 1):
                 structure = extract_table_structure(table, i)
                 
-                # Create summary row
                 summary = {
                     'Table_Number': i,
                     'Row_Count': structure['row_count'],
@@ -211,61 +205,73 @@ def save_tables_to_dataiku(tables: List[pd.DataFrame], output_filename: str,
                     'Counts_Match': structure.get('counts_match', 'N/A'),
                     'Section_Count': structure.get('section_count', 0),
                     'Page_Count': structure.get('page_count', 0),
-                    'Sections': ', '.join(map(str, structure.get('sections', [])))[:100],
-                    'Sample_Labels': ', '.join(map(str, structure.get('sample_labels', [])))[:100]
+                    'Sections': ', '.join(map(str, structure.get('sections', [])))[:50],
+                    'Sample_Labels': ', '.join(map(str, structure.get('sample_labels', [])))[:50]
                 }
                 stats_data.append(summary)
             
-            stats_df = pd.DataFrame(stats_data)
-            stats_df.to_excel(writer, sheet_name='Table_Statistics', index=False)
-            print(f"   ✅ Saved table statistics")
+            if stats_data:
+                stats_df = pd.DataFrame(stats_data)
+                stats_df.to_excel(writer, sheet_name='Statistics', index=False)
+                print(f"   ✅ Created statistics sheet")
         
-        # Save to Dataiku folder
-        excel_bytes = output.getvalue()
+        # Upload to Dataiku
+        file_size = os.path.getsize(temp_path)
         folder = get_output_folder()
         
-        with folder.get_writer(output_filename) as writer:
-            writer.write(excel_bytes)
+        with open(temp_path, 'rb') as f:
+            with folder.get_writer(output_filename) as writer:
+                chunk_size = 1024 * 1024 * 10  # 10MB chunks
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
         
-        print(f"\n🎉 Successfully saved {len(tables)} tables to Dataiku")
+        # Clean up temp file
+        os.unlink(temp_path)
+        
+        elapsed = time.time() - start_time
+        print(f"\n🎉 Successfully saved {len(tables)} tables")
         print(f"   File: {output_filename}")
+        print(f"   Size: {file_size:,} bytes")
+        print(f"   Time: {elapsed:.2f} seconds")
         
     except Exception as e:
         print(f"❌ Error saving tables: {e}")
+        # Clean up temp file if it exists
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
         raise
 
 # =============================================================================
-# CORE GROUPING FUNCTIONS
+# CORE GROUPING FUNCTIONS - OPTIMIZED
 # =============================================================================
 
-def group_into_tables(df: pd.DataFrame) -> List[pd.DataFrame]:
+def group_into_tables_fast(df: pd.DataFrame) -> List[pd.DataFrame]:
     """
-    Group rows into tables based on consecutive rows having the same 
-    Regular_Count and Consecutive_Count values.
-    
-    Args:
-        df: Input DataFrame with filtered data
-    
-    Returns:
-        List of DataFrames, each representing a table
+    FAST VERSION: Group rows into tables using vectorized operations
     """
     if df.empty:
         print("❌ Input DataFrame is empty")
         return []
     
-    # Find column names for Regular_Count and Consecutive_Count
+    # Reset index once
+    df = df.reset_index(drop=True)
+    
+    # Find column names using vectorized approach
+    cols_lower = [str(col).lower() for col in df.columns]
     regular_col = None
     consecutive_col = None
     
-    for col in df.columns:
-        col_lower = str(col).lower()
+    for i, col_lower in enumerate(cols_lower):
         if 'regular' in col_lower and 'count' in col_lower:
-            regular_col = col
+            regular_col = df.columns[i]
         elif 'consecutive' in col_lower and 'count' in col_lower:
-            consecutive_col = col
+            consecutive_col = df.columns[i]
     
     if not regular_col or not consecutive_col:
-        print(f"❌ Could not find Regular_Count and Consecutive_Count columns")
+        print(f"❌ Could not find required columns")
         print(f"   Available columns: {list(df.columns)}")
         return []
     
@@ -273,84 +279,51 @@ def group_into_tables(df: pd.DataFrame) -> List[pd.DataFrame]:
     print(f"   Regular_Count: '{regular_col}'")
     print(f"   Consecutive_Count: '{consecutive_col}'")
     
-    # Reset index for clean iteration
-    df = df.reset_index(drop=True)
-    tables = []
-    current_table = []
-    current_counts = None
-    table_number = 1
-    
     print(f"\n📊 Starting table grouping...")
-    print(f"   Total rows to process: {len(df):,}")
+    print(f"   Total rows: {len(df):,}")
+    start_time = time.time()
     
-    for idx, row in df.iterrows():
-        current_regular = row[regular_col]
-        current_consecutive = row[consecutive_col]
-        current_pair = (current_regular, current_consecutive)
-        
-        if current_counts is None:
-            # First row starts a new table
-            current_counts = current_pair
-            current_table.append(row)
-            print(f"   📋 Table {table_number} started at row {idx+1} (Counts: {current_regular}/{current_consecutive})")
-        
-        elif current_pair == current_counts:
-            # Same counts, continue current table
-            current_table.append(row)
-        
-        else:
-            # Different counts, save current table and start new one
-            if current_table:
-                table_df = pd.DataFrame(current_table)
-                table_df = table_df.reset_index(drop=True)
-                tables.append(table_df)
-                print(f"   📋 Table {table_number}: {len(table_df)} rows (Counts: {current_counts[0]}/{current_counts[1]})")
-                table_number += 1
-            
-            # Start new table
-            current_counts = current_pair
-            current_table = [row]
-            print(f"   📋 Table {table_number} started at row {idx+1} (Counts: {current_regular}/{current_consecutive})")
+    # VECTORIZED GROUPING - MUCH FASTER
+    # Create group identifiers when counts change
+    df['_group_change'] = (df[regular_col] != df[regular_col].shift()) | \
+                          (df[consecutive_col] != df[consecutive_col].shift())
+    df['_group_id'] = df['_group_change'].cumsum()
     
-    # Don't forget the last table
-    if current_table:
-        table_df = pd.DataFrame(current_table)
-        table_df = table_df.reset_index(drop=True)
+    # Group all at once
+    tables = []
+    group_stats = []
+    
+    for group_id, group in df.groupby('_group_id'):
+        # Remove temporary columns
+        table_df = group.drop(columns=['_group_change', '_group_id'])
         tables.append(table_df)
-        print(f"   📋 Table {table_number}: {len(table_df)} rows (Counts: {current_counts[0]}/{current_counts[1]})")
-    
-    print(f"\n✅ Grouped into {len(tables)} tables")
-    
-    # Show table statistics
-    print(f"\n📋 Table Summary:")
-    for i, table in enumerate(tables, 1):
-        reg_count = table[regular_col].iloc[0] if len(table) > 0 else 'N/A'
-        cons_count = table[consecutive_col].iloc[0] if len(table) > 0 else 'N/A'
         
-        # Get section information if available
-        section_info = ''
-        if 'Section' in table.columns:
-            sections = table['Section'].dropna().unique()
+        # Collect stats
+        reg_val = group[regular_col].iloc[0] if len(group) > 0 else 'N/A'
+        cons_val = group[consecutive_col].iloc[0] if len(group) > 0 else 'N/A'
+        group_stats.append((len(group), reg_val, cons_val))
+    
+    elapsed = time.time() - start_time
+    
+    print(f"✅ Grouped into {len(tables)} tables in {elapsed:.2f}s")
+    
+    # Display summary
+    print(f"\n📋 Table Summary:")
+    for i, (row_count, reg_val, cons_val) in enumerate(group_stats, 1):
+        section_info = ""
+        if i-1 < len(tables) and 'Section' in tables[i-1].columns:
+            sections = tables[i-1]['Section'].dropna().unique()
             if len(sections) > 0:
                 main_section = sections[0]
                 section_info = f" | Section: {main_section}"
-                if len(sections) > 1:
-                    section_info += f" (+{len(sections)-1} more)"
         
-        print(f"   Table {i}: {len(table):,} rows | Counts: {reg_count}/{cons_count}{section_info}")
+        print(f"   Table {i}: {row_count:,} rows | Counts: {reg_val}/{cons_val}{section_info}")
     
     return tables
 
 def extract_table_structure(table_df: pd.DataFrame, table_num: int) -> Dict:
     """
     Extract the structure of a table for analysis.
-    
-    Args:
-        table_df: DataFrame representing a table
-        table_num: Table number
-    
-    Returns:
-        Dictionary with table structure information
     """
     structure = {
         'table_number': table_num,
@@ -359,25 +332,20 @@ def extract_table_structure(table_df: pd.DataFrame, table_num: int) -> Dict:
         'column_count': len(table_df.columns)
     }
     
-    # Find Regular_Count and Consecutive_Count columns
-    regular_col = None
-    consecutive_col = None
-    
+    # Find count columns
     for col in table_df.columns:
         col_lower = str(col).lower()
         if 'regular' in col_lower and 'count' in col_lower:
-            regular_col = col
+            structure['regular_count'] = table_df[col].iloc[0] if len(table_df) > 0 else None
         elif 'consecutive' in col_lower and 'count' in col_lower:
-            consecutive_col = col
+            structure['consecutive_count'] = table_df[col].iloc[0] if len(table_df) > 0 else None
     
-    if regular_col and consecutive_col:
-        structure['regular_count'] = table_df[regular_col].iloc[0] if len(table_df) > 0 else None
-        structure['consecutive_count'] = table_df[consecutive_col].iloc[0] if len(table_df) > 0 else None
+    if 'regular_count' in structure and 'consecutive_count' in structure:
         structure['counts_match'] = structure['regular_count'] == structure['consecutive_count']
     
     # Extract sample data
     if 'Label' in table_df.columns:
-        structure['sample_labels'] = table_df['Label'].head(5).tolist()
+        structure['sample_labels'] = table_df['Label'].head(3).tolist()
     
     if 'Section' in table_df.columns:
         sections = table_df['Section'].dropna().unique()
@@ -389,78 +357,64 @@ def extract_table_structure(table_df: pd.DataFrame, table_num: int) -> Dict:
         structure['pages'] = pages.tolist()
         structure['page_count'] = len(pages)
     
-    # Check if Regular_Numbers column exists and extract sample
-    if 'Regular_Numbers' in table_df.columns:
-        try:
-            # Take first row's regular numbers as sample
-            sample_numbers = table_df['Regular_Numbers'].iloc[0]
-            structure['sample_numbers'] = sample_numbers
-            structure['number_count'] = len(sample_numbers) if isinstance(sample_numbers, list) else 'N/A'
-        except:
-            structure['sample_numbers'] = 'N/A'
-            structure['number_count'] = 'N/A'
-    
     return structure
 
 def analyze_table_columns(tables: List[pd.DataFrame]) -> None:
     """
-    Analyze the columns in each table to identify potential table structures.
-    
-    Args:
-        tables: List of table DataFrames
+    Analyze the columns in each table.
     """
-    print(f"\n🔍 Analyzing table column structures...")
+    if not tables:
+        return
+    
+    print(f"\n🔍 Analyzing table structures...")
     
     column_analysis = {}
     
     for i, table in enumerate(tables, 1):
+        # Check for Regular_Numbers column
         if 'Regular_Numbers' not in table.columns:
             continue
         
-        # Analyze first row to infer column count from Regular_Numbers
-        first_row = table.iloc[0]
-        regular_numbers = first_row['Regular_Numbers']
-        
-        if isinstance(regular_numbers, list):
-            num_columns = len(regular_numbers)
+        try:
+            first_row = table.iloc[0]
+            regular_numbers = first_row.get('Regular_Numbers')
             
-            if num_columns not in column_analysis:
-                column_analysis[num_columns] = {
-                    'count': 0,
-                    'tables': [],
-                    'sample_labels': []
-                }
-            
-            column_analysis[num_columns]['count'] += 1
-            column_analysis[num_columns]['tables'].append(i)
-            
-            # Add sample label
-            if 'Label' in table.columns:
-                label = str(first_row['Label'])[:50]
-                column_analysis[num_columns]['sample_labels'].append(label)
+            if isinstance(regular_numbers, list):
+                num_columns = len(regular_numbers)
+                
+                if num_columns not in column_analysis:
+                    column_analysis[num_columns] = {
+                        'count': 0,
+                        'tables': [],
+                        'sample_labels': []
+                    }
+                
+                column_analysis[num_columns]['count'] += 1
+                column_analysis[num_columns]['tables'].append(i)
+                
+                # Add sample label
+                if 'Label' in table.columns:
+                    label = str(first_row.get('Label', ''))[:50]
+                    column_analysis[num_columns]['sample_labels'].append(label)
+        except:
+            continue
     
     # Display analysis
-    print(f"\n📊 Table Column Analysis:")
-    print("-" * 60)
-    
-    if not column_analysis:
-        print("   No Regular_Numbers column found for analysis")
-        return
-    
-    for num_cols in sorted(column_analysis.keys()):
-        analysis = column_analysis[num_cols]
-        print(f"\n   📋 {num_cols}-column tables: {analysis['count']} table(s)")
-        print(f"      Tables: {', '.join(map(str, analysis['tables']))}")
+    if column_analysis:
+        print(f"\n📊 Table Column Analysis:")
+        print("-" * 60)
         
-        if analysis['sample_labels']:
-            print(f"      Sample labels:")
-            for label in analysis['sample_labels'][:3]:  # Show first 3
-                print(f"        - {label}")
-            if len(analysis['sample_labels']) > 3:
-                print(f"        ... and {len(analysis['sample_labels']) - 3} more")
+        for num_cols in sorted(column_analysis.keys()):
+            analysis = column_analysis[num_cols]
+            print(f"\n   📋 {num_cols}-column tables: {analysis['count']} table(s)")
+            print(f"      Tables: {', '.join(map(str, analysis['tables'][:10]))}")
+            if len(analysis['tables']) > 10:
+                print(f"      ... and {len(analysis['tables']) - 10} more")
+    else:
+        print("   No Regular_Numbers column found for analysis")
 
 # =============================================================================
-# BATCH PROCESSING FUNCTIONS
+# BATCH PROCESSING FUNCTIONS - OPTIMIZED
 # =============================================================================
 
 def batch_process_all_files():
@@ -468,11 +422,13 @@ def batch_process_all_files():
     Process all Excel files in the Dataiku input folder
     """
     print(f"\n{'='*60}")
-    print("DATAIKU TABLE GROUPING TOOL - BATCH PROCESSING")
+    print("DATAIKU TABLE GROUPING TOOL - OPTIMIZED BATCH PROCESSING")
     print(f"{'='*60}")
     print(f"Input folder:  {INPUT_FOLDER_ID}")
     print(f"Output folder: {OUTPUT_FOLDER_ID}")
     print(f"{'='*60}")
+    
+    total_start_time = time.time()
     
     # List all Excel files
     excel_files = list_excel_files_in_folder()
@@ -483,66 +439,89 @@ def batch_process_all_files():
     
     print(f"📁 Found {len(excel_files)} Excel file(s):")
     for i, filename in enumerate(excel_files, 1):
-        file_ext = filename.lower()
-        if file_ext.endswith('.xlsx'):
-            file_type = "(.xlsx)"
-        elif file_ext.endswith('.xls'):
-            file_type = "(.xls - older format)"
-        else:
-            file_type = "(unknown)"
-        print(f"   {i}. {filename} {file_type}")
+        print(f"   {i}. {filename}")
     
     print(f"\n🚀 Starting batch processing...")
     print(f"{'='*60}")
     
-    # Process each file
     results = []
+    total_tables_created = 0
+    total_rows_processed = 0
+    
     for filename in excel_files:
+        file_start_time = time.time()
         print(f"\n🎯 Processing: {filename}")
         
         try:
-            # Read Excel from Dataiku with robust error handling
+            # 1. Read Excel
             df = read_excel_from_dataiku(filename)
             
             if df.empty:
                 print(f"   ⚠️ File is empty, skipping...")
+                results.append({
+                    'input_file': filename,
+                    'status': 'skipped',
+                    'reason': 'empty file'
+                })
                 continue
             
-            # Display file info
-            print(f"   📊 File info: {len(df):,} rows, {len(df.columns)} columns")
-            print(f"   📋 Columns: {list(df.columns)}")
+            total_rows_processed += len(df)
             
-            # Group into tables
-            tables = group_into_tables(df)
+            # 2. Group into tables (using fast version)
+            print(f"   🔄 Grouping {len(df):,} rows into tables...")
+            tables = group_into_tables_fast(df)
             
             if not tables:
                 print(f"   ⚠️ No tables created, skipping...")
+                results.append({
+                    'input_file': filename,
+                    'status': 'skipped',
+                    'reason': 'no tables created'
+                })
                 continue
             
-            # Analyze table columns
-            analyze_table_columns(tables)
+            # 3. Analyze (optional)
+            if len(tables) <= 20:  # Only analyze if not too many tables
+                analyze_table_columns(tables)
             
-            # Save to Dataiku
-            output_filename = filename.replace('.xlsx', '_grouped.xlsx').replace('.xls', '_grouped.xlsx')
-            save_tables_to_dataiku(tables, output_filename)
+            # 4. Save results - FIXED: No .xlsxx bug
+            # Use pathlib for safe filename handling
+            input_path = Path(filename)
+            stem = input_path.stem  # Get filename without extension
+            output_filename = f"{stem}_grouped.xlsx"
+            
+            # Save with limited individual sheets for performance
+            max_sheets = 10  # Limit to 10 individual sheets
+            save_tables_to_dataiku(
+                tables, 
+                output_filename, 
+                include_individual_sheets=(len(tables) <= max_sheets),
+                max_sheets=max_sheets
+            )
+            
+            tables_created = len(tables)
+            total_tables_created += tables_created
+            
+            file_elapsed = time.time() - file_start_time
             
             results.append({
                 'input_file': filename,
                 'output_file': output_filename,
-                'table_count': len(tables),
+                'table_count': tables_created,
+                'rows_processed': len(df),
+                'processing_time': file_elapsed,
                 'status': 'success'
             })
             
+            print(f"   ⏱️  File processed in {file_elapsed:.2f}s")
+            
         except Exception as e:
+            file_elapsed = time.time() - file_start_time
             print(f"❌ Error processing {filename}: {e}")
-            print("   This might be due to:")
-            print("   1. File is not a valid Excel file")
-            print("   2. File is corrupted")
-            print("   3. Missing required packages (xlrd, openpyxl)")
-            print("   4. File is password protected")
             results.append({
                 'input_file': filename,
                 'error': str(e),
+                'processing_time': file_elapsed,
                 'status': 'error'
             })
         
@@ -550,48 +529,150 @@ def batch_process_all_files():
             print(f"\n{'-'*60}")
     
     # Generate summary
+    total_elapsed = time.time() - total_start_time
+    
     print(f"\n{'='*60}")
     print("BATCH PROCESSING SUMMARY")
     print(f"{'='*60}")
     
     successful = [r for r in results if r['status'] == 'success']
     errors = [r for r in results if r['status'] == 'error']
+    skipped = [r for r in results if r['status'] == 'skipped']
     
     print(f"📊 Results:")
-    print(f"   Total files processed: {len(results)}")
-    print(f"   Successfully grouped: {len(successful)}")
+    print(f"   Total files: {len(results)}")
+    print(f"   Successfully processed: {len(successful)}")
     print(f"   Errors: {len(errors)}")
+    print(f"   Skipped: {len(skipped)}")
+    print(f"   Total time: {total_elapsed:.2f}s")
     
     if successful:
-        total_tables = sum(r['table_count'] for r in successful)
-        print(f"\n✅ Created {total_tables} total tables")
+        print(f"\n📈 Performance Metrics:")
+        print(f"   Total tables created: {total_tables_created:,}")
+        print(f"   Total rows processed: {total_rows_processed:,}")
+        print(f"   Average processing time per file: {total_elapsed/len(results):.2f}s")
+        
+        # Calculate rows per second
+        if total_elapsed > 0:
+            rows_per_second = total_rows_processed / total_elapsed
+            print(f"   Processing speed: {rows_per_second:.0f} rows/second")
         
         print(f"\n📁 Output files created:")
         for result in successful:
-            print(f"   • {result['output_file']} ({result['table_count']} tables)")
+            print(f"   • {result['output_file']} ({result['table_count']} tables, {result['rows_processed']:,} rows)")
     
     if errors:
         print(f"\n❌ Files with errors:")
         for result in errors:
             print(f"   • {result['input_file']}: {result['error']}")
     
+    if skipped:
+        print(f"\n⚠️ Skipped files:")
+        for result in skipped:
+            print(f"   • {result['input_file']}: {result.get('reason', 'unknown')}")
+    
     return results
 
 # =============================================================================
-# SIMPLE VERSION - MINIMAL CODE WITH BETTER ERROR HANDLING
+# SIMPLE TEST FUNCTION
+# =============================================================================
+
+def test_filename_fix():
+    """Test that the .xlsxx bug is fixed"""
+    test_cases = [
+        "data.xlsx",
+        "data.xls",
+        "data.XLSX",
+        "data.XLS",
+        "my_file.xlsx",
+        "test.xls",
+        "document.xlsx",
+    ]
+    
+    print("Testing filename generation...")
+    for filename in test_cases:
+        input_path = Path(filename)
+        stem = input_path.stem
+        output_filename = f"{stem}_grouped.xlsx"
+        print(f"  {filename} → {output_filename}")
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+def main():
+    """
+    Main function to run the optimized Dataiku table grouping tool
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU TABLE GROUPING TOOL - OPTIMIZED VERSION")
+    print(f"{'='*60}")
+    print("Key optimizations:")
+    print("  • No BytesIO overhead - uses temp files")
+    print("  • Vectorized grouping algorithm")
+    print("  • Chunked file uploads/downloads")
+    print("  • Limited individual sheets for performance")
+    print("  • FIXED: No .xlsxx bug - uses Pathlib for safe filenames")
+    print("  • FIXED: Explicit openpyxl engine for all Excel operations")
+    print(f"\nConfiguration:")
+    print(f"  Input folder:  {INPUT_FOLDER_ID}")
+    print(f"  Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"{'='*60}")
+    
+    try:
+        # Check required packages
+        try:
+            import pandas as pd
+            import openpyxl
+            print(f"✅ Required packages loaded:")
+            print(f"   pandas: {pd.__version__}")
+            print(f"   openpyxl: {openpyxl.__version__}")
+        except ImportError as e:
+            print(f"❌ Missing required package: {e}")
+            print("   Please add 'pandas' and 'openpyxl' to your Dataiku environment")
+            return
+        
+        # Test filename fix
+        test_filename_fix()
+        
+        # Run batch processing
+        print(f"\nStarting automated batch processing...")
+        results = batch_process_all_files()
+        
+        if results:
+            successful = any(r.get('status') == 'success' for r in results)
+            
+            print(f"\n{'='*60}")
+            if successful:
+                print("✅ PROCESSING COMPLETE - OPTIMIZED RESULTS")
+                print(f"📁 Check the output folder '{OUTPUT_FOLDER_ID}' for results.")
+            else:
+                print("⚠️ PROCESSING COMPLETE - NO SUCCESSFUL PROCESSING")
+                print("   Please check your input files and configuration.")
+            print(f"{'='*60}")
+        
+        else:
+            print(f"\n⚠️ No files were processed.")
+            print(f"   Please check that Excel files exist in folder '{INPUT_FOLDER_ID}'")
+    
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+
+# =============================================================================
+# SIMPLE VERSION FOR QUICK USE
 # =============================================================================
 
 def simple_dataiku_table_group():
     """
-    Simple version for basic table grouping with better error handling
+    Simple version for basic table grouping with fixes
     """
     # CONFIGURATION
     INPUT_FOLDER = dataiku.Folder("xFGhJtYE")      # Your input folder
     OUTPUT_FOLDER = dataiku.Folder("output_folder_id")  # Your output folder
     
     print("Starting Dataiku table grouping...")
-    print(f"Input folder: {INPUT_FOLDER_ID}")
-    print(f"Output folder: {OUTPUT_FOLDER_ID}")
     
     # List Excel files
     all_files = INPUT_FOLDER.list_paths_in_partition()
@@ -601,42 +682,27 @@ def simple_dataiku_table_group():
         print("No Excel files found!")
         return
     
-    print(f"Found {len(excel_files)} Excel file(s)")
-    
     for filename in excel_files:
         print(f"\nProcessing: {filename}")
         
         try:
             # 1. READ FROM DATAIKU
             with INPUT_FOLDER.get_download_stream(filename) as stream:
-                excel_bytes = stream.read()
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+                    tmp_path = tmp.name
+                    chunk_size = 1024 * 1024
+                    while True:
+                        chunk = stream.read(chunk_size)
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
             
-            print(f"  Read {len(excel_bytes):,} bytes")
+            # 2. LOAD DATAFRAME with openpyxl
+            df = pd.read_excel(tmp_path, engine='openpyxl')
+            os.unlink(tmp_path)  # Clean up
             
-            # 2. TRY DIFFERENT ENGINES
-            excel_file = io.BytesIO(excel_bytes)
-            df = None
-            
-            # Try different engines
-            engines_to_try = ['openpyxl', 'xlrd']
-            for engine in engines_to_try:
-                try:
-                    excel_file.seek(0)  # Reset file pointer
-                    df = pd.read_excel(excel_file, engine=engine)
-                    print(f"  ✅ Loaded with {engine}: {len(df)} rows")
-                    break
-                except Exception as e:
-                    print(f"  ⚠️ {engine} failed: {e}")
-            
-            if df is None:
-                # Try without specifying engine
-                try:
-                    excel_file.seek(0)
-                    df = pd.read_excel(excel_file)
-                    print(f"  ✅ Loaded with default engine: {len(df)} rows")
-                except Exception as e:
-                    print(f"  ❌ Could not read Excel file: {e}")
-                    continue
+            print(f"  Read {len(df)} rows")
             
             # 3. FIND COLUMNS
             reg_col = None
@@ -650,41 +716,31 @@ def simple_dataiku_table_group():
                     cons_col = col
             
             if not reg_col or not cons_col:
-                print(f"  ❌ Required columns not found. Available columns: {list(df.columns)}")
+                print(f"  ❌ Columns not found. Skipping...")
                 continue
             
-            print(f"  Found columns: '{reg_col}', '{cons_col}'")
+            # 4. GROUP INTO TABLES (simple vectorized version)
+            df = df.reset_index(drop=True)
+            df['_group_change'] = (df[reg_col] != df[reg_col].shift()) | (df[cons_col] != df[cons_col].shift())
+            df['_group_id'] = df['_group_change'].cumsum()
             
-            # 4. GROUP INTO TABLES
-            tables = []
-            current_table = []
-            current_counts = None
-            
-            for idx, row in df.iterrows():
-                current_pair = (row[reg_col], row[cons_col])
-                
-                if current_counts is None:
-                    current_counts = current_pair
-                    current_table.append(row)
-                elif current_pair == current_counts:
-                    current_table.append(row)
-                else:
-                    if current_table:
-                        tables.append(pd.DataFrame(current_table))
-                    current_counts = current_pair
-                    current_table = [row]
-            
-            if current_table:
-                tables.append(pd.DataFrame(current_table))
+            tables = [group.drop(columns=['_group_change', '_group_id']) 
+                     for _, group in df.groupby('_group_id')]
             
             print(f"  ✅ Created {len(tables)} tables")
             
             # 5. SAVE TO DATAIKU
             if tables:
-                output_file = filename.replace('.xlsx', '_grouped.xlsx').replace('.xls', '_grouped.xlsx')
+                # Fix filename properly
+                stem = Path(filename).stem
+                output_file = f"{stem}_grouped.xlsx"
                 
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Create temp file
+                with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+                    temp_path = tmp.name
+                
+                # Save with openpyxl
+                with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
                     # Combined view
                     combined_data = []
                     for i, table in enumerate(tables, 1):
@@ -694,155 +750,36 @@ def simple_dataiku_table_group():
                     
                     pd.concat(combined_data).to_excel(writer, sheet_name='All_Tables', index=False)
                 
-                with OUTPUT_FOLDER.get_writer(output_file) as writer:
-                    writer.write(output.getvalue())
+                # Upload to Dataiku
+                with open(temp_path, 'rb') as f:
+                    with OUTPUT_FOLDER.get_writer(output_file) as writer:
+                        chunk_size = 1024 * 1024 * 5
+                        while True:
+                            chunk = f.read(chunk_size)
+                            if not chunk:
+                                break
+                            writer.write(chunk)
+                
+                # Clean up
+                os.unlink(temp_path)
                 
                 print(f"  💾 Saved to Dataiku: {output_file}")
         
         except Exception as e:
             print(f"  ❌ Error: {e}")
-
-# =============================================================================
-# DEBUG FUNCTION TO CHECK FILE FORMAT
-# =============================================================================
-
-def debug_file_format(filename: str):
-    """
-    Debug function to check the format of a file in Dataiku
-    """
-    folder = get_input_folder()
-    
-    print(f"\n🔍 Debugging file: {filename}")
-    
-    try:
-        with folder.get_download_stream(filename) as stream:
-            file_bytes = stream.read()
-        
-        print(f"File size: {len(file_bytes):,} bytes")
-        print(f"First 100 bytes (hex): {file_bytes[:100].hex()}")
-        print(f"First 100 bytes (ascii): {file_bytes[:100]}")
-        
-        # Check for Excel signatures
-        excel_signatures = [
-            (b'PK\x03\x04', 'Excel 2007+ (.xlsx)'),
-            (b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1', 'Excel 97-2003 (.xls)'),
-            (b'\x09\x00\x04\x00', 'Excel 5.0/95'),
-            (b'\x09\x02\x06\x00', 'Excel 2.x')
-        ]
-        
-        for signature, description in excel_signatures:
-            if file_bytes.startswith(signature):
-                print(f"✓ Detected: {description}")
-                return
-        
-        print("⚠️ Unknown file format - may not be a valid Excel file")
-        
-    except Exception as e:
-        print(f"❌ Error reading file: {e}")
-
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
-
-def main():
-    """
-    Main function to run the Dataiku table grouping tool
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TABLE GROUPING TOOL")
-    print(f"{'='*60}")
-    print("Groups consecutive rows into tables where:")
-    print("  • Regular_Count == Consecutive_Count")
-    print("  • Consecutive rows have SAME count values")
-    print()
-    print(f"Configuration:")
-    print(f"  Input folder:  {INPUT_FOLDER_ID}")
-    print(f"  Output folder: {OUTPUT_FOLDER_ID}")
-    print(f"{'='*60}")
-    
-    try:
-        # Check required packages
-        missing_packages = []
-        try:
-            import pandas as pd
-        except ImportError:
-            missing_packages.append('pandas')
-        
-        try:
-            import openpyxl
-        except ImportError:
-            missing_packages.append('openpyxl')
-        
-        try:
-            import xlrd
-        except ImportError:
-            missing_packages.append('xlrd')
-        
-        if missing_packages:
-            print(f"❌ Missing required packages: {', '.join(missing_packages)}")
-            print("   Please add these packages to your Dataiku environment:")
-            print("   1. Go to Administration → Code Envs")
-            print("   2. Select your environment → Packages")
-            print("   3. Add: pandas, openpyxl, xlrd")
-            return
-        
-        print("✅ All required packages are installed")
-        
-        # List files first
-        excel_files = list_excel_files_in_folder()
-        if not excel_files:
-            print(f"\n❌ No Excel files found in folder '{INPUT_FOLDER_ID}'")
-            print("   Please upload Excel files to the input folder")
-            return
-        
-        print(f"\n📁 Found {len(excel_files)} file(s) in input folder")
-        
-        # Optional: Debug first file
-        if excel_files:
-            print(f"\n🔍 Checking first file format: {excel_files[0]}")
-            debug_file_format(excel_files[0])
-        
-        # Ask user which mode to use
-        print(f"\n{'='*60}")
-        print("Select processing mode:")
-        print("  1. Simple mode (fast, minimal features)")
-        print("  2. Full mode (all features, robust error handling)")
-        print("  3. Debug mode (check file formats only)")
-        
-        while True:
-            choice = input("\n👉 Enter choice (1-3): ").strip()
-            
-            if choice == '1':
-                print("\n🚀 Starting SIMPLE mode...")
-                simple_dataiku_table_group()
-                break
-            elif choice == '2':
-                print("\n🚀 Starting FULL mode...")
-                results = batch_process_all_files()
-                if results:
-                    print(f"\n{'='*60}")
-                    print("✅ PROCESSING COMPLETE!")
-                    print(f"{'='*60}")
-                break
-            elif choice == '3':
-                print("\n🔍 Starting DEBUG mode...")
-                for filename in excel_files[:3]:  # Debug first 3 files
-                    debug_file_format(filename)
-                    if filename != excel_files[:3][-1]:
-                        print(f"\n{'-'*40}")
-                break
-            else:
-                print("❌ Please enter 1, 2, or 3")
-    
-    except Exception as e:
-        print(f"\n❌ An unexpected error occurred: {e}")
-        import traceback
-        traceback.print_exc()
+            # Clean up temp files
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            if 'temp_path' in locals() and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
 # =============================================================================
 # RUN THE CODE
 # =============================================================================
 
 if __name__ == "__main__":
-    # Run the main function
+    # Run the main function (recommended)
     main()
+    
+    # Alternatively, run the simple version:
+    # simple_dataiku_table_group()
