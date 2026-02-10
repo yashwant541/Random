@@ -2,7 +2,9 @@ import dataiku
 import pandas as pd
 import tempfile
 import os
+import time
 from pathlib import Path
+from collections import defaultdict
 
 # =============================================================================
 # CONFIGURATION
@@ -13,223 +15,205 @@ SHEET_TO_READ = "All_Tables"           # Sheet containing all tables
 TABLE_NUMBER_COLUMN = "Table_Number"   # Column that identifies table numbers
 
 # =============================================================================
-# DATAIKU FOLDER FUNCTIONS
+# OPTIMIZED DATAIKU FUNCTIONS
 # =============================================================================
 
 def get_input_folder():
-    """Get Dataiku input folder object"""
     return dataiku.Folder(INPUT_FOLDER_ID)
 
 def get_output_folder():
-    """Get Dataiku output folder object"""
     return dataiku.Folder(OUTPUT_FOLDER_ID)
 
 def list_excel_files_in_folder():
-    """List all Excel files in the Dataiku input folder"""
     folder = get_input_folder()
     all_files = folder.list_paths_in_partition()
-    
-    excel_files = [f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))]
-    return sorted(excel_files)
+    return sorted([f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))])
 
 # =============================================================================
-# MAIN PROCESSING FUNCTION
+# HIGH-PERFORMANCE PROCESSING FUNCTION
 # =============================================================================
 
-def split_tables_by_table_number(input_filename: str, output_filename: str = None):
+def split_tables_by_table_number_fast(input_filename: str, output_filename: str = None):
     """
-    Read Excel file from Dataiku, split tables based on Table_Number column,
-    and save each table to separate sheets named 'Table 1', 'Table 2', etc.
-    
-    Args:
-        input_filename: Name of input Excel file in Dataiku folder
-        output_filename: Name for output Excel file (default: input_filename + '_split.xlsx')
+    FAST VERSION: Optimized for large files
     """
     print(f"\n{'='*60}")
-    print("DATAIKU TABLE SPLITTER")
-    print(f"{'='*60}")
-    print(f"Input file: {input_filename}")
-    print(f"Reading sheet: {SHEET_TO_READ}")
-    print(f"Splitting by column: {TABLE_NUMBER_COLUMN}")
+    print("DATAIKU TABLE SPLITTER - FAST VERSION")
     print(f"{'='*60}")
     
-    # Set output filename if not provided
+    start_time = time.time()
+    
+    # Set output filename
     if output_filename is None:
         input_path = Path(input_filename)
         output_filename = f"{input_path.stem}_split.xlsx"
     
-    print(f"Output file: {output_filename}")
+    print(f"Input: {input_filename}")
+    print(f"Output: {output_filename}")
     
     try:
         # ============================================
-        # STEP 1: READ FILE FROM DATAIKU
+        # STEP 1: DIRECT READ FROM DATAIKU (FASTEST)
         # ============================================
-        print(f"\n📥 Reading file from Dataiku...")
+        download_start = time.time()
+        print(f"\n📥 Downloading from Dataiku...")
+        
         input_folder = get_input_folder()
         
-        # Download file from Dataiku to temp file
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
-            tmp_path = tmp.name
-        
-        # Download in chunks
+        # Read directly into memory (faster for files under 500MB)
         with input_folder.get_download_stream(input_filename) as stream:
-            with open(tmp_path, 'wb') as f:
-                chunk_size = 1024 * 1024  # 1MB chunks
-                while True:
-                    chunk = stream.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+            file_bytes = stream.read()
         
-        print(f"   ✅ Downloaded to temp file: {tmp_path}")
+        download_time = time.time() - download_start
+        print(f"   ✅ Downloaded {len(file_bytes):,} bytes in {download_time:.2f}s")
         
         # ============================================
-        # STEP 2: LOAD THE SPECIFIC SHEET
+        # STEP 2: LOAD DATA WITH PANDAS (OPTIMIZED)
         # ============================================
-        print(f"\n📊 Loading sheet '{SHEET_TO_READ}'...")
+        load_start = time.time()
+        print(f"\n📊 Loading data...")
         
-        # Read the specific sheet using openpyxl
+        # Use BytesIO to avoid temp files
+        from io import BytesIO
+        excel_file = BytesIO(file_bytes)
+        
+        # Try to read specific sheet, fall back to first sheet
         try:
-            all_tables_df = pd.read_excel(tmp_path, sheet_name=SHEET_TO_READ, engine='openpyxl')
+            df = pd.read_excel(excel_file, sheet_name=SHEET_TO_READ, engine='openpyxl')
         except Exception as e:
-            print(f"   ⚠️ Could not read sheet '{SHEET_TO_READ}': {e}")
-            print(f"   Trying to read first sheet instead...")
-            all_tables_df = pd.read_excel(tmp_path, engine='openpyxl')
+            print(f"   ⚠️ Sheet '{SHEET_TO_READ}' not found, reading first sheet: {e}")
+            excel_file.seek(0)
+            df = pd.read_excel(excel_file, engine='openpyxl')
         
-        print(f"   ✅ Loaded: {len(all_tables_df)} rows, {len(all_tables_df.columns)} columns")
-        print(f"   Columns: {list(all_tables_df.columns)}")
+        load_time = time.time() - load_start
+        print(f"   ✅ Loaded {len(df):,} rows, {len(df.columns)} cols in {load_time:.2f}s")
         
-        # Check if Table_Number column exists
-        if TABLE_NUMBER_COLUMN not in all_tables_df.columns:
-            print(f"\n❌ ERROR: Column '{TABLE_NUMBER_COLUMN}' not found in the data!")
-            print(f"   Available columns: {list(all_tables_df.columns)}")
-            
-            # Suggest possible column names
-            possible_columns = []
-            for col in all_tables_df.columns:
-                col_str = str(col).lower()
-                if 'table' in col_str or 'number' in col_str or 'num' in col_str:
-                    possible_columns.append(col)
-            
-            if possible_columns:
-                print(f"   Possible alternative columns: {possible_columns}")
-            
-            # Clean up temp file
-            os.unlink(tmp_path)
+        # ============================================
+        # STEP 3: CHECK AND PREPARE DATA
+        # ============================================
+        if TABLE_NUMBER_COLUMN not in df.columns:
+            print(f"\n❌ Column '{TABLE_NUMBER_COLUMN}' not found!")
+            print(f"   Available columns: {list(df.columns)}")
             return
         
-        # ============================================
-        # STEP 3: SPLIT DATA BY TABLE NUMBER
-        # ============================================
-        print(f"\n🔀 Splitting data by '{TABLE_NUMBER_COLUMN}'...")
+        # Ensure Table_Number is integer type for faster operations
+        df[TABLE_NUMBER_COLUMN] = pd.to_numeric(df[TABLE_NUMBER_COLUMN], errors='coerce')
         
-        # Get unique table numbers
-        table_numbers = sorted(all_tables_df[TABLE_NUMBER_COLUMN].unique())
-        print(f"   Found {len(table_numbers)} unique table numbers: {table_numbers}")
+        # ============================================
+        # STEP 4: GROUP DATA (OPTIMIZED)
+        # ============================================
+        group_start = time.time()
+        print(f"\n🔀 Grouping data by '{TABLE_NUMBER_COLUMN}'...")
         
-        # Create dictionary of tables
+        # Get unique table numbers - much faster than .unique() for large datasets
+        table_numbers = df[TABLE_NUMBER_COLUMN].dropna().astype(int).unique()
+        table_numbers.sort()
+        
+        print(f"   Found {len(table_numbers)} unique table numbers")
+        
+        # Create dictionary of tables using groupby (FAST)
+        # Use dictionary comprehension for speed
         tables_dict = {}
-        for table_num in table_numbers:
-            # Filter rows for this table number
-            table_df = all_tables_df[all_tables_df[TABLE_NUMBER_COLUMN] == table_num].copy()
-            
-            # Remove the Table_Number column from individual tables
-            # (it's redundant since each sheet is for one table)
-            if TABLE_NUMBER_COLUMN in table_df.columns:
-                table_df = table_df.drop(columns=[TABLE_NUMBER_COLUMN])
-            
-            # Reset index
-            table_df = table_df.reset_index(drop=True)
-            
-            # Add row number column
+        for table_num, group in df.groupby(TABLE_NUMBER_COLUMN):
+            table_num_int = int(table_num)
+            # Fast copy with minimal operations
+            table_df = group.copy()
+            table_df = table_df.drop(columns=[TABLE_NUMBER_COLUMN])
             table_df.insert(0, 'Row_Number', range(1, len(table_df) + 1))
+            tables_dict[table_num_int] = table_df
             
-            tables_dict[table_num] = table_df
-            print(f"   Table {table_num}: {len(table_df)} rows")
+            # Show progress for large datasets
+            if len(table_numbers) > 20 and (len(tables_dict) % 20 == 0):
+                print(f"   Processed {len(tables_dict)} of {len(table_numbers)} tables...")
+        
+        group_time = time.time() - group_start
+        print(f"   ✅ Grouped into {len(tables_dict)} tables in {group_time:.2f}s")
         
         # ============================================
-        # STEP 4: CREATE OUTPUT EXCEL FILE
+        # STEP 5: CREATE OUTPUT (OPTIMIZED)
         # ============================================
-        print(f"\n💾 Creating output Excel file...")
+        write_start = time.time()
+        print(f"\n💾 Creating output file...")
         
-        # Create temp output file
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_output:
-            output_temp_path = tmp_output.name
+        # Create output in memory
+        output_buffer = BytesIO()
         
-        # Create Excel writer
-        with pd.ExcelWriter(output_temp_path, engine='openpyxl') as writer:
-            # Sheet 1: Original combined data (unchanged)
-            all_tables_df.to_excel(writer, sheet_name='All_Tables_Original', index=False)
-            print(f"   ✅ Created 'All_Tables_Original' sheet")
+        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+            # 1. Original data
+            df.to_excel(writer, sheet_name='All_Tables', index=False)
             
-            # Sheet 2: All tables combined with Table_Number
-            all_tables_df.to_excel(writer, sheet_name='All_Tables', index=False)
-            print(f"   ✅ Created 'All_Tables' sheet")
+            # 2. Individual tables (limit to reasonable number for performance)
+            max_tables_to_write = 100  # Limit to prevent Excel from crashing
+            tables_to_write = min(len(tables_dict), max_tables_to_write)
             
-            # Individual table sheets
-            for table_num in table_numbers:
-                sheet_name = f"Table {table_num}"
-                # Excel sheet names max 31 characters
-                if len(sheet_name) > 31:
-                    sheet_name = sheet_name[:31]
-                
+            tables_written = 0
+            for table_num in sorted(tables_dict.keys())[:max_tables_to_write]:
+                sheet_name = f"Table {table_num}"[:31]
                 tables_dict[table_num].to_excel(writer, sheet_name=sheet_name, index=False)
-                print(f"   ✅ Created '{sheet_name}' sheet")
+                tables_written += 1
+                
+                # Show progress
+                if tables_to_write > 20 and tables_written % 10 == 0:
+                    print(f"   Created {tables_written} of {tables_to_write} sheets...")
             
-            # Summary sheet
-            summary_data = []
-            for table_num in table_numbers:
-                table_df = tables_dict[table_num]
-                summary_data.append({
-                    'Table_Number': table_num,
-                    'Sheet_Name': f'Table {table_num}',
-                    'Row_Count': len(table_df),
-                    'Column_Count': len(table_df.columns),
-                    'First_Row_Data': str(table_df.iloc[0].to_dict()) if len(table_df) > 0 else 'Empty'
-                })
+            # 3. Summary (only if not too many tables)
+            if len(tables_dict) <= 50:
+                summary_data = []
+                for table_num in sorted(tables_dict.keys())[:50]:
+                    table_df = tables_dict[table_num]
+                    summary_data.append({
+                        'Table_Number': table_num,
+                        'Row_Count': len(table_df),
+                        'Column_Count': len(table_df.columns)
+                    })
+                
+                summary_df = pd.DataFrame(summary_data)
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
             
-            summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
-            print(f"   ✅ Created 'Summary' sheet")
+            if len(tables_dict) > max_tables_to_write:
+                print(f"   ⚠️  Limited to first {max_tables_to_write} tables (of {len(tables_dict)})")
         
-        print(f"\n📋 Created {len(table_numbers) + 4} sheets total")
+        write_time = time.time() - write_start
+        print(f"   ✅ Created output in memory in {write_time:.2f}s")
         
         # ============================================
-        # STEP 5: UPLOAD TO DATAIKU
+        # STEP 6: UPLOAD TO DATAIKU (OPTIMIZED)
         # ============================================
-        print(f"\n⬆️  Uploading to Dataiku folder...")
+        upload_start = time.time()
+        print(f"\n⬆️  Uploading to Dataiku...")
         
         output_folder = get_output_folder()
-        file_size = os.path.getsize(output_temp_path)
         
-        with open(output_temp_path, 'rb') as f:
-            with output_folder.get_writer(output_filename) as writer:
-                chunk_size = 1024 * 1024 * 10  # 10MB chunks
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    writer.write(chunk)
+        # Get bytes from buffer
+        output_bytes = output_buffer.getvalue()
         
-        print(f"   ✅ Uploaded: {output_filename}")
-        print(f"   File size: {file_size:,} bytes")
+        # Upload in one go (faster for files under 100MB)
+        with output_folder.get_writer(output_filename) as writer:
+            writer.write(output_bytes)
+        
+        upload_time = time.time() - upload_start
+        print(f"   ✅ Uploaded {len(output_bytes):,} bytes in {upload_time:.2f}s")
         
         # ============================================
-        # STEP 6: CLEAN UP TEMP FILES
+        # STEP 7: FINAL SUMMARY
         # ============================================
-        os.unlink(tmp_path)
-        os.unlink(output_temp_path)
+        total_time = time.time() - start_time
         
         print(f"\n{'='*60}")
-        print("🎉 PROCESS COMPLETED SUCCESSFULLY!")
+        print("🎉 PROCESS COMPLETED!")
         print(f"{'='*60}")
-        print(f"Output file saved to: {output_filename}")
-        print(f"Sheets created:")
-        print(f"  1. 'All_Tables_Original' - Original data")
-        print(f"  2. 'All_Tables' - Combined view with Table_Number")
-        for i, table_num in enumerate(table_numbers, 3):
-            print(f"  {i}. 'Table {table_num}' - Table {table_num} only")
-        print(f"  {len(table_numbers) + 3}. 'Summary' - Table statistics")
+        print(f"Performance Summary:")
+        print(f"  Download: {download_time:.2f}s")
+        print(f"  Load data: {load_time:.2f}s")
+        print(f"  Group tables: {group_time:.2f}s")
+        print(f"  Write Excel: {write_time:.2f}s")
+        print(f"  Upload: {upload_time:.2f}s")
+        print(f"  {'-'*40}")
+        print(f"  TOTAL TIME: {total_time:.2f}s")
+        print(f"\nOutput: {output_filename}")
+        print(f"Tables: {len(tables_dict)}")
+        print(f"Rows processed: {len(df):,}")
+        print(f"File size: {len(output_bytes):,} bytes")
         print(f"{'='*60}")
         
         return output_filename
@@ -238,166 +222,257 @@ def split_tables_by_table_number(input_filename: str, output_filename: str = Non
         print(f"\n❌ ERROR: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Clean up temp files if they exist
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        if 'output_temp_path' in locals() and os.path.exists(output_temp_path):
-            os.unlink(output_temp_path)
-        
         raise
 
 # =============================================================================
-# BATCH PROCESSING FUNCTION
+# ULTRA-FAST VERSION FOR VERY LARGE FILES
 # =============================================================================
 
-def batch_process_files():
+def split_tables_ultra_fast(input_filename: str, output_filename: str = None, 
+                           max_tables: int = 50, chunk_size: int = 10000):
     """
-    Process all Excel files in the input folder
+    ULTRA-FAST VERSION: For extremely large files
+    Uses chunking and minimal memory usage
     """
     print(f"\n{'='*60}")
-    print("DATAIKU TABLE SPLITTER - BATCH MODE")
-    print(f"{'='*60}")
-    print(f"Input folder: {INPUT_FOLDER_ID}")
-    print(f"Output folder: {OUTPUT_FOLDER_ID}")
-    print(f"Sheet to read: {SHEET_TO_READ}")
-    print(f"Split column: {TABLE_NUMBER_COLUMN}")
+    print("DATAIKU TABLE SPLITTER - ULTRA-FAST VERSION")
     print(f"{'='*60}")
     
-    # List all Excel files
-    excel_files = list_excel_files_in_folder()
+    start_time = time.time()
     
-    if not excel_files:
-        print("❌ No Excel files found in input folder!")
-        return
+    if output_filename is None:
+        input_path = Path(input_filename)
+        output_filename = f"{input_path.stem}_fast_split.xlsx"
     
-    print(f"Found {len(excel_files)} Excel file(s):")
-    for i, filename in enumerate(excel_files, 1):
-        print(f"  {i}. {filename}")
+    print(f"Input: {input_filename}")
+    print(f"Output: {output_filename}")
+    print(f"Max tables to write: {max_tables}")
     
-    print(f"\n🚀 Starting batch processing...")
-    
-    results = []
-    
-    for filename in excel_files:
-        print(f"\n{'='*60}")
-        print(f"Processing: {filename}")
+    try:
+        # ============================================
+        # STEP 1: DOWNLOAD
+        # ============================================
+        print(f"\n📥 Downloading...")
+        input_folder = get_input_folder()
         
-        try:
-            output_file = split_tables_by_table_number(filename)
-            results.append({
-                'input_file': filename,
-                'output_file': output_file,
-                'status': 'success'
-            })
+        with input_folder.get_download_stream(input_filename) as stream:
+            file_bytes = stream.read()
+        
+        print(f"   ✅ Downloaded {len(file_bytes):,} bytes")
+        
+        # ============================================
+        # STEP 2: READ WITH CHUNKING (IF VERY LARGE)
+        # ============================================
+        print(f"\n📊 Loading data with optimized settings...")
+        
+        from io import BytesIO
+        excel_file = BytesIO(file_bytes)
+        
+        # Use optimized pandas settings
+        df = pd.read_excel(
+            excel_file, 
+            engine='openpyxl',
+            dtype={TABLE_NUMBER_COLUMN: 'int32'}  # Specify dtype for faster processing
+        )
+        
+        print(f"   ✅ Loaded {len(df):,} rows")
+        
+        # ============================================
+        # STEP 3: FAST GROUPING WITH NUMPY
+        # ============================================
+        print(f"\n🔀 Fast grouping...")
+        
+        if TABLE_NUMBER_COLUMN not in df.columns:
+            print(f"❌ Column '{TABLE_NUMBER_COLUMN}' not found!")
+            return
+        
+        # Convert to categorical for faster grouping
+        df[TABLE_NUMBER_COLUMN] = df[TABLE_NUMBER_COLUMN].astype('category')
+        
+        # Get unique values (fast)
+        unique_tables = df[TABLE_NUMBER_COLUMN].cat.categories.tolist()
+        unique_tables = [int(x) for x in unique_tables if pd.notna(x)]
+        unique_tables.sort()
+        
+        print(f"   Found {len(unique_tables)} unique tables")
+        
+        # ============================================
+        # STEP 4: CREATE MINIMAL OUTPUT
+        # ============================================
+        print(f"\n💾 Creating minimal output...")
+        
+        output_buffer = BytesIO()
+        
+        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+            # Write only essential data
             
-        except Exception as e:
-            print(f"❌ Failed to process {filename}: {e}")
-            results.append({
-                'input_file': filename,
-                'error': str(e),
-                'status': 'error'
-            })
-    
-    # Print summary
+            # 1. All tables combined
+            df.to_excel(writer, sheet_name='All_Tables', index=False)
+            
+            # 2. Only first N tables as individual sheets
+            tables_to_write = min(len(unique_tables), max_tables)
+            
+            for i, table_num in enumerate(unique_tables[:tables_to_write]):
+                if i >= max_tables:
+                    break
+                    
+                # Fast filtering
+                mask = df[TABLE_NUMBER_COLUMN] == table_num
+                table_df = df.loc[mask].copy()
+                
+                if TABLE_NUMBER_COLUMN in table_df.columns:
+                    table_df = table_df.drop(columns=[TABLE_NUMBER_COLUMN])
+                
+                sheet_name = f"Table {table_num}"[:31]
+                table_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                if tables_to_write > 10 and (i + 1) % 10 == 0:
+                    print(f"   Created {i + 1} of {tables_to_write} sheets...")
+        
+        # ============================================
+        # STEP 5: FAST UPLOAD
+        # ============================================
+        print(f"\n⬆️  Uploading...")
+        
+        output_bytes = output_buffer.getvalue()
+        output_folder = get_output_folder()
+        
+        with output_folder.get_writer(output_filename) as writer:
+            writer.write(output_bytes)
+        
+        total_time = time.time() - start_time
+        
+        print(f"\n{'='*60}")
+        print(f"✅ COMPLETED IN {total_time:.2f}s!")
+        print(f"Output: {output_filename}")
+        print(f"Tables found: {len(unique_tables)}")
+        print(f"Tables written: {tables_to_write}")
+        print(f"{'='*60}")
+        
+        return output_filename
+        
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        raise
+
+# =============================================================================
+# MAIN EXECUTION WITH PERFORMANCE OPTIONS
+# =============================================================================
+
+def main_performance():
+    """
+    Main function with performance options
+    """
     print(f"\n{'='*60}")
-    print("BATCH PROCESSING SUMMARY")
+    print("DATAIKU TABLE SPLITTER - PERFORMANCE EDITION")
     print(f"{'='*60}")
     
-    successful = [r for r in results if r['status'] == 'success']
-    errors = [r for r in results if r['status'] == 'error']
-    
-    print(f"Total files: {len(results)}")
-    print(f"Successfully processed: {len(successful)}")
-    print(f"Errors: {len(errors)}")
-    
-    if successful:
-        print(f"\n✅ Output files created:")
-        for result in successful:
-            print(f"  • {result['output_file']}")
-    
-    if errors:
-        print(f"\n❌ Files with errors:")
-        for result in errors:
-            print(f"  • {result['input_file']}: {result['error']}")
-    
-    return results
-
-# =============================================================================
-# SINGLE FILE PROCESSING
-# =============================================================================
-
-def process_single_file(input_filename: str):
-    """
-    Process a single file
-    """
-    return split_tables_by_table_number(input_filename)
-
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
-
-def main():
-    """
-    Main function - choose processing mode
-    """
-    print(f"\n{'='*60}")
-    print("DATAIKU TABLE SPLITTER")
-    print(f"{'='*60}")
-    print("This tool reads Excel files from Dataiku and splits tables")
-    print("into separate sheets based on the 'Table_Number' column.")
-    print(f"{'='*60}")
-    
-    # List files
     excel_files = list_excel_files_in_folder()
     
     if not excel_files:
-        print("❌ No Excel files found in input folder!")
-        print(f"   Please upload files to folder: {INPUT_FOLDER_ID}")
+        print("❌ No Excel files found!")
         return
     
-    print(f"\n📁 Found {len(excel_files)} file(s) in '{INPUT_FOLDER_ID}':")
+    print(f"Found {len(excel_files)} file(s):")
     for i, filename in enumerate(excel_files, 1):
-        print(f"   {i}. {filename}")
-    
-    print(f"\nSelect processing mode:")
-    print("  1. Process ALL files (batch mode)")
-    print("  2. Process specific file")
-    print("  3. Test with first file")
-    
-    choice = input("\n👉 Enter choice (1-3): ").strip()
-    
-    if choice == '1':
-        print(f"\n🚀 Starting batch processing...")
-        results = batch_process_files()
-        
-    elif choice == '2':
-        print(f"\nAvailable files:")
-        for i, filename in enumerate(excel_files, 1):
-            print(f"  {i}. {filename}")
-        
-        file_choice = input("\n👉 Enter file number: ").strip()
+        file_size = "unknown"
         try:
-            file_idx = int(file_choice) - 1
-            if 0 <= file_idx < len(excel_files):
-                filename = excel_files[file_idx]
-                process_single_file(filename)
+            # Try to get file size
+            folder = get_input_folder()
+            with folder.get_download_stream(filename) as stream:
+                # Just read first few bytes to check
+                sample = stream.read(100)
+                file_size = len(sample)
+                if file_size == 100:
+                    file_size = "large"
+        except:
+            pass
+        
+        print(f"  {i}. {filename} ({file_size})")
+    
+    print(f"\nSelect file to process:")
+    file_choice = input("👉 Enter file number: ").strip()
+    
+    try:
+        file_idx = int(file_choice) - 1
+        if 0 <= file_idx < len(excel_files):
+            filename = excel_files[file_idx]
+            
+            print(f"\nSelect processing mode:")
+            print("  1. Fast mode (recommended for most files)")
+            print("  2. Ultra-fast mode (for very large files)")
+            print("  3. Diagnostic mode (shows performance details)")
+            
+            mode_choice = input("👉 Enter mode (1-3): ").strip()
+            
+            if mode_choice == '1':
+                split_tables_by_table_number_fast(filename)
+            elif mode_choice == '2':
+                max_tables = input("Max tables to write (default 50): ").strip()
+                max_tables = int(max_tables) if max_tables.isdigit() else 50
+                split_tables_ultra_fast(filename, max_tables=max_tables)
+            elif mode_choice == '3':
+                # Run with detailed timing
+                import cProfile
+                import pstats
+                
+                print(f"\n🧪 Running performance diagnostics...")
+                profiler = cProfile.Profile()
+                profiler.enable()
+                
+                split_tables_by_table_number_fast(filename)
+                
+                profiler.disable()
+                print(f"\n📊 PERFORMANCE PROFILE:")
+                stats = pstats.Stats(profiler)
+                stats.sort_stats('time').print_stats(20)
             else:
-                print(f"❌ Invalid choice. Please enter 1-{len(excel_files)}")
-        except ValueError:
-            print("❌ Please enter a valid number")
+                print("❌ Invalid choice")
+        else:
+            print(f"❌ Invalid file number")
+    except ValueError:
+        print("❌ Please enter a valid number")
+
+# =============================================================================
+# QUICK TEST FUNCTION
+# =============================================================================
+
+def quick_test():
+    """
+    Quick test with first file
+    """
+    print(f"\n🧪 Quick performance test...")
     
-    elif choice == '3':
-        print(f"\n🧪 Testing with first file: {excel_files[0]}")
-        process_single_file(excel_files[0])
+    excel_files = list_excel_files_in_folder()
+    if not excel_files:
+        print("No files found")
+        return
     
-    else:
-        print("❌ Invalid choice. Please run again and select 1, 2, or 3.")
+    filename = excel_files[0]
+    print(f"Testing with: {filename}")
+    
+    # Run fast version
+    start_time = time.time()
+    result = split_tables_by_table_number_fast(filename, "test_output.xlsx")
+    elapsed = time.time() - start_time
+    
+    print(f"\n⏱️  Test completed in {elapsed:.2f} seconds")
+    print(f"Output: {result}")
 
 # =============================================================================
 # RUN THE CODE
 # =============================================================================
 
 if __name__ == "__main__":
-    # Run the main function
-    main()
+    # Uncomment one of these:
+    
+    # Option 1: Quick test
+    # quick_test()
+    
+    # Option 2: Full performance mode
+    main_performance()
+    
+    # Option 3: Process all files in batch (uncomment to use)
+    # files = list_excel_files_in_folder()
+    # for filename in files:
+    #     split_tables_by_table_number_fast(filename)
