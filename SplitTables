@@ -1,0 +1,403 @@
+import dataiku
+import pandas as pd
+import tempfile
+import os
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+INPUT_FOLDER_ID = "xFGhJtYE"           # Your input folder ID
+OUTPUT_FOLDER_ID = "output_folder_id"  # Your output folder ID
+SHEET_TO_READ = "All_Tables"           # Sheet containing all tables
+TABLE_NUMBER_COLUMN = "Table_Number"   # Column that identifies table numbers
+
+# =============================================================================
+# DATAIKU FOLDER FUNCTIONS
+# =============================================================================
+
+def get_input_folder():
+    """Get Dataiku input folder object"""
+    return dataiku.Folder(INPUT_FOLDER_ID)
+
+def get_output_folder():
+    """Get Dataiku output folder object"""
+    return dataiku.Folder(OUTPUT_FOLDER_ID)
+
+def list_excel_files_in_folder():
+    """List all Excel files in the Dataiku input folder"""
+    folder = get_input_folder()
+    all_files = folder.list_paths_in_partition()
+    
+    excel_files = [f for f in all_files if f.lower().endswith(('.xlsx', '.xls'))]
+    return sorted(excel_files)
+
+# =============================================================================
+# MAIN PROCESSING FUNCTION
+# =============================================================================
+
+def split_tables_by_table_number(input_filename: str, output_filename: str = None):
+    """
+    Read Excel file from Dataiku, split tables based on Table_Number column,
+    and save each table to separate sheets named 'Table 1', 'Table 2', etc.
+    
+    Args:
+        input_filename: Name of input Excel file in Dataiku folder
+        output_filename: Name for output Excel file (default: input_filename + '_split.xlsx')
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU TABLE SPLITTER")
+    print(f"{'='*60}")
+    print(f"Input file: {input_filename}")
+    print(f"Reading sheet: {SHEET_TO_READ}")
+    print(f"Splitting by column: {TABLE_NUMBER_COLUMN}")
+    print(f"{'='*60}")
+    
+    # Set output filename if not provided
+    if output_filename is None:
+        input_path = Path(input_filename)
+        output_filename = f"{input_path.stem}_split.xlsx"
+    
+    print(f"Output file: {output_filename}")
+    
+    try:
+        # ============================================
+        # STEP 1: READ FILE FROM DATAIKU
+        # ============================================
+        print(f"\n📥 Reading file from Dataiku...")
+        input_folder = get_input_folder()
+        
+        # Download file from Dataiku to temp file
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+            tmp_path = tmp.name
+        
+        # Download in chunks
+        with input_folder.get_download_stream(input_filename) as stream:
+            with open(tmp_path, 'wb') as f:
+                chunk_size = 1024 * 1024  # 1MB chunks
+                while True:
+                    chunk = stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        
+        print(f"   ✅ Downloaded to temp file: {tmp_path}")
+        
+        # ============================================
+        # STEP 2: LOAD THE SPECIFIC SHEET
+        # ============================================
+        print(f"\n📊 Loading sheet '{SHEET_TO_READ}'...")
+        
+        # Read the specific sheet using openpyxl
+        try:
+            all_tables_df = pd.read_excel(tmp_path, sheet_name=SHEET_TO_READ, engine='openpyxl')
+        except Exception as e:
+            print(f"   ⚠️ Could not read sheet '{SHEET_TO_READ}': {e}")
+            print(f"   Trying to read first sheet instead...")
+            all_tables_df = pd.read_excel(tmp_path, engine='openpyxl')
+        
+        print(f"   ✅ Loaded: {len(all_tables_df)} rows, {len(all_tables_df.columns)} columns")
+        print(f"   Columns: {list(all_tables_df.columns)}")
+        
+        # Check if Table_Number column exists
+        if TABLE_NUMBER_COLUMN not in all_tables_df.columns:
+            print(f"\n❌ ERROR: Column '{TABLE_NUMBER_COLUMN}' not found in the data!")
+            print(f"   Available columns: {list(all_tables_df.columns)}")
+            
+            # Suggest possible column names
+            possible_columns = []
+            for col in all_tables_df.columns:
+                col_str = str(col).lower()
+                if 'table' in col_str or 'number' in col_str or 'num' in col_str:
+                    possible_columns.append(col)
+            
+            if possible_columns:
+                print(f"   Possible alternative columns: {possible_columns}")
+            
+            # Clean up temp file
+            os.unlink(tmp_path)
+            return
+        
+        # ============================================
+        # STEP 3: SPLIT DATA BY TABLE NUMBER
+        # ============================================
+        print(f"\n🔀 Splitting data by '{TABLE_NUMBER_COLUMN}'...")
+        
+        # Get unique table numbers
+        table_numbers = sorted(all_tables_df[TABLE_NUMBER_COLUMN].unique())
+        print(f"   Found {len(table_numbers)} unique table numbers: {table_numbers}")
+        
+        # Create dictionary of tables
+        tables_dict = {}
+        for table_num in table_numbers:
+            # Filter rows for this table number
+            table_df = all_tables_df[all_tables_df[TABLE_NUMBER_COLUMN] == table_num].copy()
+            
+            # Remove the Table_Number column from individual tables
+            # (it's redundant since each sheet is for one table)
+            if TABLE_NUMBER_COLUMN in table_df.columns:
+                table_df = table_df.drop(columns=[TABLE_NUMBER_COLUMN])
+            
+            # Reset index
+            table_df = table_df.reset_index(drop=True)
+            
+            # Add row number column
+            table_df.insert(0, 'Row_Number', range(1, len(table_df) + 1))
+            
+            tables_dict[table_num] = table_df
+            print(f"   Table {table_num}: {len(table_df)} rows")
+        
+        # ============================================
+        # STEP 4: CREATE OUTPUT EXCEL FILE
+        # ============================================
+        print(f"\n💾 Creating output Excel file...")
+        
+        # Create temp output file
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_output:
+            output_temp_path = tmp_output.name
+        
+        # Create Excel writer
+        with pd.ExcelWriter(output_temp_path, engine='openpyxl') as writer:
+            # Sheet 1: Original combined data (unchanged)
+            all_tables_df.to_excel(writer, sheet_name='All_Tables_Original', index=False)
+            print(f"   ✅ Created 'All_Tables_Original' sheet")
+            
+            # Sheet 2: All tables combined with Table_Number
+            all_tables_df.to_excel(writer, sheet_name='All_Tables', index=False)
+            print(f"   ✅ Created 'All_Tables' sheet")
+            
+            # Individual table sheets
+            for table_num in table_numbers:
+                sheet_name = f"Table {table_num}"
+                # Excel sheet names max 31 characters
+                if len(sheet_name) > 31:
+                    sheet_name = sheet_name[:31]
+                
+                tables_dict[table_num].to_excel(writer, sheet_name=sheet_name, index=False)
+                print(f"   ✅ Created '{sheet_name}' sheet")
+            
+            # Summary sheet
+            summary_data = []
+            for table_num in table_numbers:
+                table_df = tables_dict[table_num]
+                summary_data.append({
+                    'Table_Number': table_num,
+                    'Sheet_Name': f'Table {table_num}',
+                    'Row_Count': len(table_df),
+                    'Column_Count': len(table_df.columns),
+                    'First_Row_Data': str(table_df.iloc[0].to_dict()) if len(table_df) > 0 else 'Empty'
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            print(f"   ✅ Created 'Summary' sheet")
+        
+        print(f"\n📋 Created {len(table_numbers) + 4} sheets total")
+        
+        # ============================================
+        # STEP 5: UPLOAD TO DATAIKU
+        # ============================================
+        print(f"\n⬆️  Uploading to Dataiku folder...")
+        
+        output_folder = get_output_folder()
+        file_size = os.path.getsize(output_temp_path)
+        
+        with open(output_temp_path, 'rb') as f:
+            with output_folder.get_writer(output_filename) as writer:
+                chunk_size = 1024 * 1024 * 10  # 10MB chunks
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
+        
+        print(f"   ✅ Uploaded: {output_filename}")
+        print(f"   File size: {file_size:,} bytes")
+        
+        # ============================================
+        # STEP 6: CLEAN UP TEMP FILES
+        # ============================================
+        os.unlink(tmp_path)
+        os.unlink(output_temp_path)
+        
+        print(f"\n{'='*60}")
+        print("🎉 PROCESS COMPLETED SUCCESSFULLY!")
+        print(f"{'='*60}")
+        print(f"Output file saved to: {output_filename}")
+        print(f"Sheets created:")
+        print(f"  1. 'All_Tables_Original' - Original data")
+        print(f"  2. 'All_Tables' - Combined view with Table_Number")
+        for i, table_num in enumerate(table_numbers, 3):
+            print(f"  {i}. 'Table {table_num}' - Table {table_num} only")
+        print(f"  {len(table_numbers) + 3}. 'Summary' - Table statistics")
+        print(f"{'='*60}")
+        
+        return output_filename
+        
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Clean up temp files if they exist
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        if 'output_temp_path' in locals() and os.path.exists(output_temp_path):
+            os.unlink(output_temp_path)
+        
+        raise
+
+# =============================================================================
+# BATCH PROCESSING FUNCTION
+# =============================================================================
+
+def batch_process_files():
+    """
+    Process all Excel files in the input folder
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU TABLE SPLITTER - BATCH MODE")
+    print(f"{'='*60}")
+    print(f"Input folder: {INPUT_FOLDER_ID}")
+    print(f"Output folder: {OUTPUT_FOLDER_ID}")
+    print(f"Sheet to read: {SHEET_TO_READ}")
+    print(f"Split column: {TABLE_NUMBER_COLUMN}")
+    print(f"{'='*60}")
+    
+    # List all Excel files
+    excel_files = list_excel_files_in_folder()
+    
+    if not excel_files:
+        print("❌ No Excel files found in input folder!")
+        return
+    
+    print(f"Found {len(excel_files)} Excel file(s):")
+    for i, filename in enumerate(excel_files, 1):
+        print(f"  {i}. {filename}")
+    
+    print(f"\n🚀 Starting batch processing...")
+    
+    results = []
+    
+    for filename in excel_files:
+        print(f"\n{'='*60}")
+        print(f"Processing: {filename}")
+        
+        try:
+            output_file = split_tables_by_table_number(filename)
+            results.append({
+                'input_file': filename,
+                'output_file': output_file,
+                'status': 'success'
+            })
+            
+        except Exception as e:
+            print(f"❌ Failed to process {filename}: {e}")
+            results.append({
+                'input_file': filename,
+                'error': str(e),
+                'status': 'error'
+            })
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print("BATCH PROCESSING SUMMARY")
+    print(f"{'='*60}")
+    
+    successful = [r for r in results if r['status'] == 'success']
+    errors = [r for r in results if r['status'] == 'error']
+    
+    print(f"Total files: {len(results)}")
+    print(f"Successfully processed: {len(successful)}")
+    print(f"Errors: {len(errors)}")
+    
+    if successful:
+        print(f"\n✅ Output files created:")
+        for result in successful:
+            print(f"  • {result['output_file']}")
+    
+    if errors:
+        print(f"\n❌ Files with errors:")
+        for result in errors:
+            print(f"  • {result['input_file']}: {result['error']}")
+    
+    return results
+
+# =============================================================================
+# SINGLE FILE PROCESSING
+# =============================================================================
+
+def process_single_file(input_filename: str):
+    """
+    Process a single file
+    """
+    return split_tables_by_table_number(input_filename)
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+def main():
+    """
+    Main function - choose processing mode
+    """
+    print(f"\n{'='*60}")
+    print("DATAIKU TABLE SPLITTER")
+    print(f"{'='*60}")
+    print("This tool reads Excel files from Dataiku and splits tables")
+    print("into separate sheets based on the 'Table_Number' column.")
+    print(f"{'='*60}")
+    
+    # List files
+    excel_files = list_excel_files_in_folder()
+    
+    if not excel_files:
+        print("❌ No Excel files found in input folder!")
+        print(f"   Please upload files to folder: {INPUT_FOLDER_ID}")
+        return
+    
+    print(f"\n📁 Found {len(excel_files)} file(s) in '{INPUT_FOLDER_ID}':")
+    for i, filename in enumerate(excel_files, 1):
+        print(f"   {i}. {filename}")
+    
+    print(f"\nSelect processing mode:")
+    print("  1. Process ALL files (batch mode)")
+    print("  2. Process specific file")
+    print("  3. Test with first file")
+    
+    choice = input("\n👉 Enter choice (1-3): ").strip()
+    
+    if choice == '1':
+        print(f"\n🚀 Starting batch processing...")
+        results = batch_process_files()
+        
+    elif choice == '2':
+        print(f"\nAvailable files:")
+        for i, filename in enumerate(excel_files, 1):
+            print(f"  {i}. {filename}")
+        
+        file_choice = input("\n👉 Enter file number: ").strip()
+        try:
+            file_idx = int(file_choice) - 1
+            if 0 <= file_idx < len(excel_files):
+                filename = excel_files[file_idx]
+                process_single_file(filename)
+            else:
+                print(f"❌ Invalid choice. Please enter 1-{len(excel_files)}")
+        except ValueError:
+            print("❌ Please enter a valid number")
+    
+    elif choice == '3':
+        print(f"\n🧪 Testing with first file: {excel_files[0]}")
+        process_single_file(excel_files[0])
+    
+    else:
+        print("❌ Invalid choice. Please run again and select 1, 2, or 3.")
+
+# =============================================================================
+# RUN THE CODE
+# =============================================================================
+
+if __name__ == "__main__":
+    # Run the main function
+    main()
